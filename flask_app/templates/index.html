@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ocean of Stars Explorer</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    background: #0b0d17;
+    color: #e8e8f0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: #9a9ab0; font-size: 0.85rem; margin-bottom: 20px; }
+  .subtitle a { color: #8ab4f8; }
+  .page { max-width: 2100px; }
+  .layout {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .preview-panel {
+    position: relative;
+    max-width: 900px;
+    flex: 1 1 500px;
+  }
+  #previewWrap {
+    position: relative;
+    display: inline-block;
+    cursor: crosshair;
+    border: 1px solid #333;
+    background: #000;
+  }
+  #previewImg {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  #selectionBox {
+    position: absolute;
+    border: 2px solid #ffd54a;
+    background: rgba(255, 213, 74, 0.15);
+    display: none;
+    pointer-events: none;
+  }
+  .side-panel {
+    flex: 0 0 340px;
+    min-width: 280px;
+  }
+  fieldset {
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+  }
+  legend { padding: 0 6px; color: #9a9ab0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .coord-row { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 2px 0; }
+  .coord-row span:first-child { color: #9a9ab0; }
+  button {
+    background: #3a5fcc;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    width: 100%;
+  }
+  button:disabled { background: #333; cursor: not-allowed; color: #777; }
+  button:hover:not(:disabled) { background: #4a6fdc; }
+  #hint { font-size: 0.8rem; color: #9a9ab0; margin-top: 8px; }
+
+  /* Subimage result section - deliberately spans the full page width so it
+     renders at least as large as the preview map above. */
+  #cropSection {
+    display: none;
+    margin-top: 28px;
+    width: 100%;
+  }
+  .crop-flex {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .crop-main { flex: 1 1 640px; min-width: 320px; }
+  .stars-panel { flex: 1 1 720px; min-width: 560px; }
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid #333;
+    margin-bottom: 16px;
+  }
+  .tab-btn {
+    width: auto;
+    background: transparent;
+    color: #9a9ab0;
+    border-radius: 6px 6px 0 0;
+    padding: 8px 20px;
+  }
+  .tab-btn.active {
+    background: #1a1d2e;
+    color: #e8e8f0;
+    font-weight: 600;
+  }
+  .tab-btn:hover:not(.active) { background: #14162280; color: #cfcfe0; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .crop-meta {
+    font-size: 0.85rem;
+    color: #9a9ab0;
+    margin-bottom: 10px;
+  }
+  .crop-meta strong { color: #e8e8f0; }
+  .crop-img-wrap {
+    position: relative;
+    display: block;
+    line-height: 0;
+  }
+  .crop-img-wrap img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #000;
+  }
+  .star-marker {
+    position: absolute;
+    width: 26px;
+    height: 26px;
+    margin-left: -13px;
+    margin-top: -13px;
+    border: 2px solid #ff4fd8;
+    border-radius: 50%;
+    box-shadow: 0 0 12px 3px rgba(255, 79, 216, 0.75);
+    pointer-events: none;
+    display: none;
+  }
+  .star-marker::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 2px;
+    background: #ff4fd8;
+    transform: translate(-50%, -50%);
+  }
+  .crop-download { display: inline-block; margin-top: 10px; color: #8ab4f8; font-size: 0.85rem; }
+  .crop-error { color: #f88; font-size: 0.9rem; }
+  .crop-loading { color: #9a9ab0; font-size: 0.9rem; }
+
+  .scale-legend {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    pointer-events: none;
+    text-shadow: 0 1px 3px #000;
+  }
+  .scale-bar { position: relative; height: 3px; background: #e8e8f0; box-shadow: 0 0 2px #000; }
+  .scale-bar::before, .scale-bar::after {
+    content: "";
+    position: absolute;
+    width: 1px;
+    height: 8px;
+    background: #e8e8f0;
+    top: -3px;
+  }
+  .scale-bar::before { left: 0; }
+  .scale-bar::after { right: 0; }
+  .scale-label { font-size: 0.72rem; color: #e8e8f0; white-space: nowrap; }
+
+  .pm-line {
+    position: absolute;
+    height: 2px;
+    background: #ffd54a;
+    transform-origin: 0 50%;
+    box-shadow: 0 0 5px 1px rgba(255, 213, 74, 0.8);
+  }
+  .pm-tick {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    margin-left: -3px;
+    margin-top: -3px;
+    border-radius: 50%;
+    background: #ffd54a;
+    border: 1px solid #14162c;
+  }
+  .pm-tick.pm-tick-final { width: 10px; height: 10px; margin-left: -5px; margin-top: -5px; }
+  .pm-tick-label {
+    position: absolute;
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: #14162c;
+    background: #ffd54a;
+    padding: 0 4px;
+    border-radius: 3px;
+    transform: translate(7px, -7px);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .sky-region-box { font-size: 0.82rem; line-height: 1.6; }
+  .sky-region-box .row { display: flex; justify-content: space-between; gap: 8px; }
+  .sky-region-box .row span:first-child { color: #9a9ab0; }
+  .sky-region-box .row span:last-child { text-align: right; }
+  .approx-note { font-size: 0.72rem; color: #6c6c80; margin-top: 8px; }
+
+  .star-table-wrap { max-height: 460px; overflow: auto; }
+  .star-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  .star-table th {
+    position: sticky; top: 0;
+    text-align: left;
+    color: #9a9ab0;
+    font-weight: 600;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 5px 8px;
+    border-bottom: 1px solid #333;
+    background: #0b0d17;
+  }
+  .star-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #1a1d2e;
+    white-space: nowrap;
+    color: #cfcfe0;
+  }
+  .star-row { cursor: pointer; }
+  .star-row:hover td { background: #1a1d2e; }
+  .star-row.selected td { background: rgba(255, 79, 216, 0.12); }
+  .star-table td.desig { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.72rem; color: #9a9ab0; }
+  .star-table td.mag { color: #ffd54a; font-weight: 600; }
+  .spectral-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #14162c;
+  }
+  .pm-cell { display: flex; align-items: center; gap: 5px; }
+  .pm-arrow { display: inline-block; font-size: 0.9rem; line-height: 1; color: #8ab4f8; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+<h1>{{ info.title }} &mdash; Subimage Explorer</h1>
+<p class="subtitle">
+  Full frame: {{ info.width }} &times; {{ info.height }} px (preview) &middot;
+  field of view {{ info.field_of_view }} &middot;
+  center RA {{ info.center_ra }}, Dec {{ info.center_dec }} &middot;
+  Credit: {{ info.credit }} &middot;
+  <a href="{{ info.source_url }}" target="_blank" rel="noopener">source</a>
+</p>
+
+<div class="layout">
+  <div class="preview-panel">
+    <div id="previewWrap">
+      <img id="previewImg" src="{{ url_for('static', filename='img/ocean_of_stars.jpg') }}" alt="Ocean of Stars full frame">
+      <div id="selectionBox"></div>
+    </div>
+    <p id="hint">Click and drag on the image to select a region.</p>
+  </div>
+
+  <div class="side-panel">
+    <fieldset>
+      <legend>Selection (preview pixels)</legend>
+      <div class="coord-row"><span>x</span><span id="valX">-</span></div>
+      <div class="coord-row"><span>y</span><span id="valY">-</span></div>
+      <div class="coord-row"><span>width</span><span id="valW">-</span></div>
+      <div class="coord-row"><span>height</span><span id="valH">-</span></div>
+      <br>
+      <button id="cropBtn" disabled>Extract subimage</button>
+    </fieldset>
+  </div>
+</div>
+
+<div id="cropSection">
+  <div class="crop-flex">
+    <div class="crop-main">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="lowres" type="button">Low res (JPEG)</button>
+        <button class="tab-btn" data-tab="hires" type="button">High res (TIFF)</button>
+      </div>
+
+      <div class="tab-panel active" id="panel-lowres">
+        <div class="crop-meta" id="lowresMeta"></div>
+        <p class="crop-loading" id="lowresStatus"></p>
+        <div class="crop-img-wrap" id="lowresImgWrap" style="display:none;">
+          <img id="lowresImg" alt="Low-res subimage">
+          <div class="star-marker" id="lowresMarker"></div>
+        </div>
+        <a class="crop-download" id="lowresDownload" style="display:none;">Download full-size crop</a>
+      </div>
+
+      <div class="tab-panel" id="panel-hires">
+        <div class="crop-meta" id="hiresMeta"></div>
+        <p class="crop-loading" id="hiresStatus"></p>
+        <div class="crop-img-wrap" id="hiresImgWrap" style="display:none;">
+          <img id="hiresImg" alt="High-res subimage">
+          <div class="star-marker" id="hiresMarker"></div>
+        </div>
+        <a class="crop-download" id="hiresDownload" style="display:none;">Download full-size crop</a>
+      </div>
+    </div>
+
+    <div class="stars-panel">
+      <fieldset>
+        <legend>Sky area covered</legend>
+        <div class="sky-region-box" id="skyRegionBox">-</div>
+        <div class="approx-note">Plate solution fit against real Gaia DR3 star positions (gnomonic projection + fitted rotation/scale); accurate to a few pixels across the whole frame, including the corners.</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>10 brightest Gaia DR3 stars here</legend>
+        <div id="starListBody"><p class="crop-loading">-</p></div>
+        <div class="approx-note">Live query to the Gaia archive (gaiadr3.gaia_source), sorted by G-band magnitude. Click a star to highlight it on the images (arrow shows its +100&nbsp;yr proper-motion position - 1/10&nbsp;yr are sub-pixel at typical zoom). Distance is 1/parallax, "unknown" where parallax is missing or unreliable (common for faint/distant stars). Spectral type is estimated from teff_gspphot or BP&minus;RP color, not a formal classification.</div>
+      </fieldset>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const previewImg = document.getElementById('previewImg');
+const previewWrap = document.getElementById('previewWrap');
+const selectionBox = document.getElementById('selectionBox');
+const cropBtn = document.getElementById('cropBtn');
+const valX = document.getElementById('valX');
+const valY = document.getElementById('valY');
+const valW = document.getElementById('valW');
+const valH = document.getElementById('valH');
+
+const cropSection = document.getElementById('cropSection');
+const lowresMeta = document.getElementById('lowresMeta');
+const lowresStatus = document.getElementById('lowresStatus');
+const lowresImgWrap = document.getElementById('lowresImgWrap');
+const lowresImg = document.getElementById('lowresImg');
+const lowresMarker = document.getElementById('lowresMarker');
+const lowresDownload = document.getElementById('lowresDownload');
+const hiresMeta = document.getElementById('hiresMeta');
+const hiresStatus = document.getElementById('hiresStatus');
+const hiresImgWrap = document.getElementById('hiresImgWrap');
+const hiresImg = document.getElementById('hiresImg');
+const hiresMarker = document.getElementById('hiresMarker');
+const hiresDownload = document.getElementById('hiresDownload');
+const skyRegionBox = document.getElementById('skyRegionBox');
+const starListBody = document.getElementById('starListBody');
+
+const MASTER_WIDTH = {{ info.width }};
+const MASTER_HEIGHT = {{ info.height }};
+const HIRES_AVAILABLE = {{ 'true' if info.hires_available else 'false' }};
+
+let dragging = false;
+let startX = 0, startY = 0;
+let selection = null; // {x, y, w, h} in preview (low-res) pixel space
+let currentSkyRegion = null;
+let currentStars = [];
+let selectedStarIndex = null;
+
+function displayToNatural(px, py) {
+  const rect = previewImg.getBoundingClientRect();
+  const scaleX = MASTER_WIDTH / rect.width;
+  const scaleY = MASTER_HEIGHT / rect.height;
+  return {
+    x: Math.round((px - rect.left) * scaleX),
+    y: Math.round((py - rect.top) * scaleY),
+  };
+}
+
+previewWrap.addEventListener('mousedown', (e) => {
+  dragging = true;
+  startX = e.clientX;
+  startY = e.clientY;
+  selectionBox.style.left = '0px';
+  selectionBox.style.top = '0px';
+  selectionBox.style.width = '0px';
+  selectionBox.style.height = '0px';
+  selectionBox.style.display = 'block';
+  cropBtn.disabled = true;
+  e.preventDefault();
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  const wrapRect = previewWrap.getBoundingClientRect();
+  const left = Math.min(startX, e.clientX) - wrapRect.left;
+  const top = Math.min(startY, e.clientY) - wrapRect.top;
+  const width = Math.abs(e.clientX - startX);
+  const height = Math.abs(e.clientY - startY);
+  selectionBox.style.left = left + 'px';
+  selectionBox.style.top = top + 'px';
+  selectionBox.style.width = width + 'px';
+  selectionBox.style.height = height + 'px';
+});
+
+window.addEventListener('mouseup', (e) => {
+  if (!dragging) return;
+  dragging = false;
+
+  const p1 = displayToNatural(Math.min(startX, e.clientX), Math.min(startY, e.clientY));
+  const p2 = displayToNatural(Math.max(startX, e.clientX), Math.max(startY, e.clientY));
+
+  const x = Math.max(0, Math.min(p1.x, MASTER_WIDTH));
+  const y = Math.max(0, Math.min(p1.y, MASTER_HEIGHT));
+  const w = Math.max(0, Math.min(p2.x, MASTER_WIDTH) - x);
+  const h = Math.max(0, Math.min(p2.y, MASTER_HEIGHT) - y);
+
+  if (w < 4 || h < 4) {
+    selectionBox.style.display = 'none';
+    return;
+  }
+
+  selection = { x, y, w, h };
+  valX.textContent = x;
+  valY.textContent = y;
+  valW.textContent = w;
+  valH.textContent = h;
+  cropBtn.disabled = false;
+});
+
+// --- Tabs ---
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    // the just-shown panel had a 0-width rect while hidden, so its scale bar/motion
+    // arrow (which depend on the rendered image size) couldn't be computed until now.
+    refreshOverlays();
+  });
+});
+
+async function fetchCrop(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error || resp.statusText);
+  }
+  const blob = await resp.blob();
+  return { blob, headers: resp.headers };
+}
+
+// --- Star marker placement ---
+function positionMarker(kind) {
+  const marker = kind === 'lowres' ? lowresMarker : hiresMarker;
+  if (selectedStarIndex === null || !currentSkyRegion || !currentStars[selectedStarIndex]) {
+    marker.style.display = 'none';
+    return null;
+  }
+  const box = kind === 'lowres' ? currentSkyRegion.lowres_box : currentSkyRegion.hires_box;
+  const star = currentStars[selectedStarIndex];
+  const sx = kind === 'lowres' ? star.lowres_x : star.hires_x;
+  const sy = kind === 'lowres' ? star.lowres_y : star.hires_y;
+  if (!box || sx === undefined || sy === undefined) {
+    marker.style.display = 'none';
+    return null;
+  }
+  const fracX = (sx - box.x0) / (box.x1 - box.x0);
+  const fracY = (sy - box.y0) / (box.y1 - box.y0);
+  marker.style.left = (fracX * 100) + '%';
+  marker.style.top = (fracY * 100) + '%';
+  marker.style.display = 'block';
+  return { fracX, fracY, star };
+}
+
+// arcsec of sky per CSS pixel of the *displayed* image - same for both tabs
+// since both show the same angular field width, just possibly rendered at a
+// slightly different CSS width.
+function arcsecPerCssPx(img) {
+  if (!currentSkyRegion || !img.naturalWidth) return null;
+  const rect = img.getBoundingClientRect();
+  if (!rect.width) return null;
+  return (currentSkyRegion.width_arcmin * 60) / rect.width;
+}
+
+function formatAngle(mas) {
+  if (mas >= 60000) return `${(mas / 60000).toFixed(2)}′ (${(mas / 1000).toFixed(1)}″)`;
+  if (mas >= 1000) return `${(mas / 1000).toFixed(2)}″ (${mas.toFixed(0)} mas)`;
+  return `${mas.toFixed(1)} mas`;
+}
+
+// Round to a "nice" 1-2-5-10 * 10^n number, the way map/photo scale bars do,
+// instead of labeling the bar with whatever number a fixed 1-inch length works out to.
+function niceRound(raw) {
+  if (!(raw > 0) || !isFinite(raw)) return raw;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  let best = mag, bestRatio = Infinity;
+  for (const step of [1, 2, 5, 10]) {
+    const cand = step * mag;
+    const ratio = raw > cand ? raw / cand : cand / raw;
+    if (ratio < bestRatio) { bestRatio = ratio; best = cand; }
+  }
+  return best;
+}
+
+function updateScaleBar(kind) {
+  const wrap = kind === 'lowres' ? lowresImgWrap : hiresImgWrap;
+  const img = kind === 'lowres' ? lowresImg : hiresImg;
+  let legend = wrap.querySelector('.scale-legend');
+  const asPerPx = arcsecPerCssPx(img);
+  if (asPerPx === null) {
+    if (legend) legend.remove();
+    return;
+  }
+  const masPerPx = asPerPx * 1000;
+  const rawMas = masPerPx * 96; // ~1 inch (96 CSS px), before rounding to something nice
+
+  let unitSuffix, masPerUnit;
+  if (rawMas >= 60000) { unitSuffix = '′'; masPerUnit = 60000; }
+  else if (rawMas >= 1000) { unitSuffix = '″'; masPerUnit = 1000; }
+  else { unitSuffix = ' mas'; masPerUnit = 1; }
+
+  const niceInUnit = niceRound(rawMas / masPerUnit);
+  const niceMas = niceInUnit * masPerUnit;
+  const barWidthPx = niceMas / masPerPx;
+
+  if (!legend) {
+    legend = document.createElement('div');
+    legend.className = 'scale-legend';
+    legend.innerHTML = '<div class="scale-bar"></div><div class="scale-label"></div>';
+    wrap.appendChild(legend);
+  }
+  legend.querySelector('.scale-bar').style.width = barWidthPx + 'px';
+  legend.querySelector('.scale-label').textContent = `${niceInUnit}${unitSuffix}`;
+}
+
+function updateMotionArrow(kind) {
+  const wrap = kind === 'lowres' ? lowresImgWrap : hiresImgWrap;
+  const img = kind === 'lowres' ? lowresImg : hiresImg;
+  let layer = wrap.querySelector('.pm-layer');
+  if (layer) layer.remove();
+
+  if (selectedStarIndex === null || !currentStars[selectedStarIndex]) return;
+  const star = currentStars[selectedStarIndex];
+  if (star.pm_mas_yr === undefined || star.pm_mas_yr === null) return;
+  const box = kind === 'lowres' ? currentSkyRegion.lowres_box : currentSkyRegion.hires_box;
+  const sx = kind === 'lowres' ? star.lowres_x : star.hires_x;
+  const sy = kind === 'lowres' ? star.lowres_y : star.hires_y;
+  if (!box || sx === undefined) return;
+
+  const asPerPx = arcsecPerCssPx(img);
+  if (asPerPx === null) return;
+  const masPerCssPx = asPerPx * 1000;
+
+  const rect = img.getBoundingClientRect();
+  const fracX = (sx - box.x0) / (box.x1 - box.x0);
+  const fracY = (sy - box.y0) / (box.y1 - box.y0);
+  const originX = fracX * rect.width;
+  const originY = fracY * rect.height;
+
+  // North is up, East is left in this image (see plate solution note).
+  const paRad = star.pm_direction_deg * Math.PI / 180;
+  const dirX = -Math.sin(paRad);
+  const dirY = -Math.cos(paRad);
+  const angleDeg = Math.atan2(dirY, dirX) * 180 / Math.PI;
+
+  layer = document.createElement('div');
+  layer.className = 'pm-layer';
+  layer.style.cssText = 'position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;';
+
+  const YEARS = 100; // 1yr/10yr displacement is sub-pixel at typical zoom - not useful to plot
+  const distPx = (star.pm_mas_yr * YEARS) / masPerCssPx;
+  const tx = originX + dirX * distPx;
+  const ty = originY + dirY * distPx;
+
+  const line = document.createElement('div');
+  line.className = 'pm-line';
+  line.style.left = originX + 'px';
+  line.style.top = originY + 'px';
+  line.style.width = Math.max(distPx, 1) + 'px';
+  line.style.transform = `rotate(${angleDeg}deg)`;
+  layer.appendChild(line);
+
+  const tick = document.createElement('div');
+  tick.className = 'pm-tick pm-tick-final';
+  tick.style.left = tx + 'px';
+  tick.style.top = ty + 'px';
+  tick.title = `+${YEARS} yr: ${formatAngle(star.pm_mas_yr * YEARS)} from current position`;
+  layer.appendChild(tick);
+
+  const label = document.createElement('div');
+  label.className = 'pm-tick-label';
+  label.style.left = tx + 'px';
+  label.style.top = ty + 'px';
+  label.textContent = `+${YEARS}y`;
+  layer.appendChild(label);
+
+  wrap.appendChild(layer);
+}
+
+function refreshOverlays() {
+  positionMarker('lowres');
+  positionMarker('hires');
+  updateScaleBar('lowres');
+  updateScaleBar('hires');
+  updateMotionArrow('lowres');
+  updateMotionArrow('hires');
+}
+
+window.addEventListener('resize', () => {
+  if (cropSection.style.display !== 'none') refreshOverlays();
+});
+
+function renderSkyRegion(sr) {
+  skyRegionBox.innerHTML = `
+    <div class="row"><span>RA range</span><span>${sr.ra_min_str} &ndash; ${sr.ra_max_str}</span></div>
+    <div class="row"><span>Dec range</span><span>${sr.dec_min_str} &ndash; ${sr.dec_max_str}</span></div>
+    <div class="row"><span>Center</span><span>${sr.center_ra_str}, ${sr.center_dec_str}</span></div>
+    <div class="row"><span>Size</span><span>${sr.width_arcmin.toFixed(2)}&prime; &times; ${sr.height_arcmin.toFixed(2)}&prime;</span></div>
+  `;
+}
+
+const SPECTRAL_COLORS = {
+  O: '#9bb0ff', B: '#aabfff', A: '#cad7ff', F: '#f8f7ff',
+  G: '#fff4ea', K: '#ffcc6f', M: '#ffaa66',
+};
+
+function renderStarList() {
+  if (!currentStars || currentStars.length === 0) {
+    starListBody.innerHTML = '<p class="crop-loading">No Gaia DR3 sources found in this region.</p>';
+    return;
+  }
+  const rows = currentStars.map((s, i) => {
+    const badge = s.spectral_type
+      ? `<span class="spectral-badge" style="background:${SPECTRAL_COLORS[s.spectral_type] || '#999'}">${s.spectral_type}</span>`
+      : '&mdash;';
+    const pm = (s.pm_mas_yr !== undefined && s.pm_mas_yr !== null)
+      ? `<span class="pm-cell">
+           <span class="pm-arrow" style="transform:rotate(${-s.pm_direction_deg}deg)">&#8593;</span>
+           <span>${s.pm_mas_yr.toFixed(1)} mas/yr, PA ${s.pm_direction_deg.toFixed(0)}&deg;</span>
+         </span>`
+      : 'n/a';
+    const distance = (s.distance_ly !== undefined && s.distance_ly !== null)
+      ? `${s.distance_ly < 1000 ? s.distance_ly.toFixed(1) : Math.round(s.distance_ly).toLocaleString()} ly`
+      : 'unknown';
+    return `
+    <tr class="star-row${i === selectedStarIndex ? ' selected' : ''}" data-idx="${i}">
+      <td>${i + 1}</td>
+      <td class="desig">${s.designation}</td>
+      <td class="mag">${s.mag.toFixed(2)}</td>
+      <td>${badge}</td>
+      <td>${distance}</td>
+      <td>${s.ra.toFixed(4)}&deg;</td>
+      <td>${s.dec.toFixed(4)}&deg;</td>
+      <td>${pm}</td>
+    </tr>`;
+  }).join('');
+  starListBody.innerHTML = `
+    <div class="star-table-wrap">
+      <table class="star-table">
+        <thead><tr>
+          <th>#</th><th>Designation</th><th>G mag</th><th>Type</th><th>Distance</th><th>RA</th><th>Dec</th><th>Proper motion</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  starListBody.querySelectorAll('.star-row').forEach((el) => {
+    el.addEventListener('click', () => {
+      selectedStarIndex = parseInt(el.dataset.idx, 10);
+      renderStarList();
+      refreshOverlays();
+    });
+  });
+}
+
+async function loadLowRes(params) {
+  lowresStatus.textContent = 'Extracting from low-res JPEG...';
+  lowresImgWrap.style.display = 'none';
+  lowresDownload.style.display = 'none';
+  lowresMeta.textContent = '';
+  try {
+    const { blob, headers } = await fetchCrop('/api/crop?' + params.toString());
+    const objectUrl = URL.createObjectURL(blob);
+    const w = headers.get('X-Output-Width') || selection.w;
+    const h = headers.get('X-Output-Height') || selection.h;
+    lowresMeta.innerHTML = `<strong>${w} &times; ${h} px</strong> from the ${MASTER_WIDTH} &times; ${MASTER_HEIGHT} px preview JPEG`;
+    lowresImg.onload = refreshOverlays;
+    lowresImg.src = objectUrl;
+    lowresImgWrap.style.display = 'block';
+    lowresDownload.href = objectUrl;
+    lowresDownload.download = `ocean_of_stars_lowres_${selection.x}_${selection.y}.jpg`;
+    lowresDownload.style.display = 'inline-block';
+    lowresStatus.textContent = '';
+  } catch (err) {
+    lowresStatus.innerHTML = `<span class="crop-error">Error: ${err.message}</span>`;
+  }
+  refreshOverlays();
+}
+
+async function loadHiRes(params) {
+  if (!HIRES_AVAILABLE) {
+    hiresMeta.textContent = '';
+    hiresStatus.innerHTML = `<span class="crop-error">
+      The full-resolution TIFF isn't available on the server. Download it from the
+      NOIRLab source page and set the <code>OCEAN_OF_STARS_TIFF</code> environment
+      variable (or place it at the default path) before starting the app.
+    </span>`;
+    return;
+  }
+  hiresStatus.textContent = 'Reading region from the full-resolution TIFF...';
+  hiresImgWrap.style.display = 'none';
+  hiresDownload.style.display = 'none';
+  hiresMeta.textContent = '';
+  try {
+    const { blob, headers } = await fetchCrop('/api/crop_hires?' + params.toString());
+    const objectUrl = URL.createObjectURL(blob);
+    const nativeW = headers.get('X-Native-Width');
+    const nativeH = headers.get('X-Native-Height');
+    const outW = headers.get('X-Output-Width');
+    const outH = headers.get('X-Output-Height');
+    const step = parseInt(headers.get('X-Downsample-Step') || '1', 10);
+    hiresMeta.innerHTML = step > 1
+      ? `<strong>${outW} &times; ${outH} px</strong> shown (downsampled ${step}x from a native ${nativeW} &times; ${nativeH} px region of the full TIFF)`
+      : `<strong>${outW} &times; ${outH} px</strong> at native full-resolution TIFF detail`;
+    hiresImg.onload = refreshOverlays;
+    hiresImg.src = objectUrl;
+    hiresImgWrap.style.display = 'block';
+    hiresDownload.href = objectUrl;
+    hiresDownload.download = `ocean_of_stars_hires_${selection.x}_${selection.y}.jpg`;
+    hiresDownload.style.display = 'inline-block';
+    hiresStatus.textContent = '';
+  } catch (err) {
+    hiresStatus.innerHTML = `<span class="crop-error">Error: ${err.message}</span>`;
+  }
+  refreshOverlays();
+}
+
+async function loadStars(params) {
+  starListBody.innerHTML = '<p class="crop-loading">Querying Gaia DR3 for this sky region...</p>';
+  skyRegionBox.innerHTML = '<p class="crop-loading">Computing...</p>';
+  selectedStarIndex = null;
+  currentStars = [];
+  currentSkyRegion = null;
+  try {
+    const resp = await fetch('/api/stars?' + params.toString());
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    currentSkyRegion = data.sky_region;
+    renderSkyRegion(currentSkyRegion);
+    currentStars = data.stars || [];
+    if (data.query_error) {
+      starListBody.innerHTML = `<p class="crop-error">${data.query_error}</p>`;
+    } else {
+      renderStarList();
+    }
+  } catch (err) {
+    skyRegionBox.innerHTML = `<span class="crop-error">Error: ${err.message}</span>`;
+    starListBody.innerHTML = '';
+  }
+  refreshOverlays();
+}
+
+cropBtn.addEventListener('click', async () => {
+  if (!selection) return;
+  cropBtn.disabled = true;
+  cropBtn.textContent = 'Extracting...';
+  cropSection.style.display = 'block';
+
+  const params = new URLSearchParams(selection);
+  await Promise.all([loadLowRes(params), loadHiRes(params), loadStars(params)]);
+
+  cropBtn.disabled = false;
+  cropBtn.textContent = 'Extract subimage';
+});
+</script>
+
+</body>
+</html>
