@@ -121,6 +121,7 @@
     position: relative;
     display: block;
     line-height: 0;
+    cursor: crosshair;
   }
   .crop-img-wrap img {
     display: block;
@@ -129,6 +130,15 @@
     border: 1px solid #333;
     border-radius: 4px;
     background: #000;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  .zoom-box {
+    position: absolute;
+    border: 2px dashed #ffd54a;
+    background: rgba(255, 213, 74, 0.15);
+    display: none;
+    pointer-events: none;
   }
   .star-marker {
     position: absolute;
@@ -303,8 +313,10 @@
         <div class="crop-img-wrap" id="lowresImgWrap" style="display:none;">
           <img id="lowresImg" alt="Low-res subimage">
           <div class="star-marker" id="lowresMarker"></div>
+          <div class="zoom-box" id="lowresZoomBox"></div>
         </div>
         <a class="crop-download" id="lowresDownload" style="display:none;">Download full-size crop</a>
+        <p class="approx-note">Drag a rectangle on this image to zoom in - it becomes the new selection.</p>
       </div>
 
       <div class="tab-panel" id="panel-hires">
@@ -313,8 +325,10 @@
         <div class="crop-img-wrap" id="hiresImgWrap" style="display:none;">
           <img id="hiresImg" alt="High-res subimage">
           <div class="star-marker" id="hiresMarker"></div>
+          <div class="zoom-box" id="hiresZoomBox"></div>
         </div>
         <a class="crop-download" id="hiresDownload" style="display:none;">Download full-size crop</a>
+        <p class="approx-note">Drag a rectangle on this image to zoom in - it becomes the new selection.</p>
       </div>
     </div>
 
@@ -365,6 +379,8 @@ const starListBody = document.getElementById('starListBody');
 const MASTER_WIDTH = {{ info.width }};
 const MASTER_HEIGHT = {{ info.height }};
 const HIRES_AVAILABLE = {{ 'true' if info.hires_available else 'false' }};
+const HIRES_WIDTH = {{ info.hires_width or 0 }};
+const HIRES_HEIGHT = {{ info.hires_height or 0 }};
 
 let dragging = false;
 let startX = 0, startY = 0;
@@ -753,6 +769,7 @@ async function loadStars(params) {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     currentSkyRegion = data.sky_region;
+    cropBoxes = data.sky_region; // server-confirmed geometry (same fields)
     renderSkyRegion(currentSkyRegion);
     currentStars = data.stars || [];
     if (data.query_error) {
@@ -767,18 +784,136 @@ async function loadStars(params) {
   refreshOverlays();
 }
 
-cropBtn.addEventListener('click', async () => {
+async function doExtract() {
   if (!selection) return;
   cropBtn.disabled = true;
   cropBtn.textContent = 'Extracting...';
   cropSection.style.display = 'block';
+  cropBoxes = computeCropBoxes(selection);
 
   const params = new URLSearchParams(selection);
   await Promise.all([loadLowRes(params), loadHiRes(params), loadStars(params)]);
 
   cropBtn.disabled = false;
   cropBtn.textContent = 'Extract subimage';
+}
+
+cropBtn.addEventListener('click', doExtract);
+
+function updateSelectionReadout() {
+  valX.textContent = selection.x;
+  valY.textContent = selection.y;
+  valW.textContent = selection.w;
+  valH.textContent = selection.h;
+  cropBtn.disabled = false;
+}
+
+// Draw the yellow selection rectangle on the top preview from `selection`
+// (master pixel coords) - used when the selection is set programmatically
+// by zooming on a lower image rather than by dragging the top map.
+function updatePreviewSelectionBox() {
+  const rect = previewImg.getBoundingClientRect();
+  if (!rect.width) return;
+  selectionBox.style.left = (previewImg.offsetLeft + selection.x / MASTER_WIDTH * rect.width) + 'px';
+  selectionBox.style.top = (previewImg.offsetTop + selection.y / MASTER_HEIGHT * rect.height) + 'px';
+  selectionBox.style.width = (selection.w / MASTER_WIDTH * rect.width) + 'px';
+  selectionBox.style.height = (selection.h / MASTER_HEIGHT * rect.height) + 'px';
+  selectionBox.style.display = 'block';
+}
+
+// --- Zoom by dragging on a lower (crop) image ---
+// The drag rectangle, in displayed-crop fractions, is mapped back to master
+// (lowres preview) pixel coords via the crop's known source box, and becomes
+// the new selection.
+let zoomDrag = null; // {kind, startX, startY}
+const lowresZoomBox = document.getElementById('lowresZoomBox');
+const hiresZoomBox = document.getElementById('hiresZoomBox');
+
+// Geometry of the currently displayed crops, mirroring the server's clamping.
+// Set synchronously at extract time so zooming works while the (slower) Gaia
+// star query is still in flight; the /api/stars response carries the same
+// values and simply confirms them.
+let cropBoxes = null;
+
+function computeCropBoxes(sel) {
+  const x0 = sel.x, y0 = sel.y, x1 = sel.x + sel.w, y1 = sel.y + sel.h;
+  const boxes = { lowres_box: { x0, y0, x1, y1 } };
+  if (HIRES_AVAILABLE) {
+    const sx = HIRES_WIDTH / MASTER_WIDTH, sy = HIRES_HEIGHT / MASTER_HEIGHT;
+    const hx0 = Math.max(0, Math.min(Math.floor(x0 * sx), HIRES_WIDTH - 1));
+    const hy0 = Math.max(0, Math.min(Math.floor(y0 * sy), HIRES_HEIGHT - 1));
+    boxes.hires_box = {
+      x0: hx0, y0: hy0,
+      x1: Math.max(hx0 + 1, Math.min(Math.floor(x1 * sx), HIRES_WIDTH)),
+      y1: Math.max(hy0 + 1, Math.min(Math.floor(y1 * sy), HIRES_HEIGHT)),
+    };
+  }
+  return boxes;
+}
+
+function cropFracToMaster(kind, fx, fy) {
+  const box = kind === 'lowres' ? cropBoxes.lowres_box : cropBoxes.hires_box;
+  const bx = box.x0 + fx * (box.x1 - box.x0);
+  const by = box.y0 + fy * (box.y1 - box.y0);
+  if (kind === 'lowres') return { x: bx, y: by };
+  return { x: bx / (HIRES_WIDTH / MASTER_WIDTH), y: by / (HIRES_HEIGHT / MASTER_HEIGHT) };
+}
+
+function attachZoomDrag(kind, wrapEl, imgEl, boxEl) {
+  wrapEl.addEventListener('mousedown', (e) => {
+    if (!cropBoxes) return;
+    zoomDrag = { kind, startX: e.clientX, startY: e.clientY };
+    boxEl.style.left = '0px';
+    boxEl.style.top = '0px';
+    boxEl.style.width = '0px';
+    boxEl.style.height = '0px';
+    boxEl.style.display = 'block';
+    e.preventDefault();
+  });
+}
+
+window.addEventListener('mousemove', (e) => {
+  if (!zoomDrag) return;
+  const wrapEl = zoomDrag.kind === 'lowres' ? lowresImgWrap : hiresImgWrap;
+  const boxEl = zoomDrag.kind === 'lowres' ? lowresZoomBox : hiresZoomBox;
+  const wrapRect = wrapEl.getBoundingClientRect();
+  boxEl.style.left = (Math.min(zoomDrag.startX, e.clientX) - wrapRect.left) + 'px';
+  boxEl.style.top = (Math.min(zoomDrag.startY, e.clientY) - wrapRect.top) + 'px';
+  boxEl.style.width = Math.abs(e.clientX - zoomDrag.startX) + 'px';
+  boxEl.style.height = Math.abs(e.clientY - zoomDrag.startY) + 'px';
 });
+
+window.addEventListener('mouseup', (e) => {
+  if (!zoomDrag) return;
+  const drag = zoomDrag;
+  zoomDrag = null;
+  const imgEl = drag.kind === 'lowres' ? lowresImg : hiresImg;
+  const boxEl = drag.kind === 'lowres' ? lowresZoomBox : hiresZoomBox;
+  boxEl.style.display = 'none';
+
+  const rect = imgEl.getBoundingClientRect();
+  if (!rect.width || !cropBoxes) return;
+  const fx0 = Math.max(0, Math.min(1, (Math.min(drag.startX, e.clientX) - rect.left) / rect.width));
+  const fx1 = Math.max(0, Math.min(1, (Math.max(drag.startX, e.clientX) - rect.left) / rect.width));
+  const fy0 = Math.max(0, Math.min(1, (Math.min(drag.startY, e.clientY) - rect.top) / rect.height));
+  const fy1 = Math.max(0, Math.min(1, (Math.max(drag.startY, e.clientY) - rect.top) / rect.height));
+
+  const p0 = cropFracToMaster(drag.kind, fx0, fy0);
+  const p1 = cropFracToMaster(drag.kind, fx1, fy1);
+  const x = Math.max(0, Math.round(p0.x));
+  const y = Math.max(0, Math.round(p0.y));
+  const w = Math.min(MASTER_WIDTH, Math.round(p1.x)) - x;
+  const h = Math.min(MASTER_HEIGHT, Math.round(p1.y)) - y;
+  if (w < 2 || h < 2) return; // too small a drag - treat as a stray click
+
+  selection = { x, y, w, h };
+  updateSelectionReadout();
+  updatePreviewSelectionBox();
+  doExtract();
+});
+
+attachZoomDrag('lowres', lowresImgWrap, lowresImg, lowresZoomBox);
+attachZoomDrag('hires', hiresImgWrap, hiresImg, hiresZoomBox);
 </script>
 
 </body>
