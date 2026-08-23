@@ -1,20 +1,34 @@
 # Gaia Explorer
 
-Tools for exploring the NSF–DOE Vera C. Rubin Observatory's **"Ocean of Stars"**
-image ([noirlab2616a](https://noirlab.edu/public/images/noirlab2616a/)) — a
-1.7-gigapixel, 56428 × 29949 px view of a star field in Lupus, taken with the
-LSST Camera at the start of the Legacy Survey of Space and Time.
+Tools for exploring gigapixel NSF–DOE Vera C. Rubin Observatory images.
 
-## flask_app — Ocean of Stars Subimage Explorer
+## flask_app — Rubin Observatory Subimage Explorer
 
-A local Flask web app for panning around the full image and pulling out
-subimages at full resolution:
+A local Flask web app for panning around a full-frame Rubin image and pulling
+out subimages at full resolution. Two images are currently registered (see
+`flask_app/images.py`):
 
+- **[Ocean of Stars](https://noirlab.edu/public/images/noirlab2616a/)**
+  (`noirlab2616a`) — a 1.7-gigapixel, 56428 × 29949 px view of a star field
+  in Lupus, taken with the LSST Camera at the start of the Legacy Survey of
+  Space and Time.
+- **[Cosmos](https://noirlab.edu/public/images/noirlab2618a/)** (`noirlab2618a`)
+  — a 55536 × 30291 px deep coadd of the COSMOS field in Sextans, released
+  for Rubin's Early Data Preview 2.
+
+More images can be added by appending an `ImageConfig` entry to
+`flask_app/images.py`.
+
+- **Pick an image** from the picker at the top of the page. If its low-res
+  preview JPEG hasn't been downloaded yet, a "Download preview" button fetches
+  it from NOIRLab directly into the app (a few MB, seconds).
 - **Drag-select a region** on the full-frame preview map and extract the
-  matching crop in two flavors: the bundled 4000 × 2123 preview JPEG
-  ("Low res" tab) and the full-resolution 16-bit TIFF ("High res" tab).
-  The TIFF is read via a numpy memmap, so crops are fast and the 10 GB file
-  is never loaded into RAM.
+  matching crop in two flavors: the low-res preview JPEG ("Low res" tab) and
+  the full-resolution 16-bit TIFF ("High res" tab). If the full-res TIFF
+  (~9.4 GB) hasn't been downloaded yet, the "High res" tab shows a download
+  button instead — click it to fetch it in the background, with a progress
+  bar. The TIFF is read via a numpy memmap, so crops are fast and the file is
+  never loaded into RAM.
 - **Zoom by dragging on an extracted image** — the dragged rectangle becomes
   the new selection and re-extracts automatically, so you can iteratively
   dive down to native TIFF resolution.
@@ -24,10 +38,23 @@ subimages at full resolution:
   years), and proper motion. Click a star to highlight it on the crops and
   draw its +100-year proper-motion vector; a scale bar shows the angular
   scale.
-- Sky coordinates come from a plate solution fit against ~4500 detected Gaia
-  star positions (gnomonic projection + degree-3 polynomial distortion,
-  median residual ~0.4 preview px — see `flask_app/tools/plate_solve.py`),
-  with star positions propagated from Gaia's J2016 epoch to the image epoch.
+- Sky coordinates come from a plate solution: a real fit against thousands of
+  detected Gaia star positions where available (gnomonic projection +
+  degree-3 polynomial distortion — see `flask_app/tools/plate_solve.py`), or
+  a linear (undistorted) TAN projection derived from the image's published
+  field of view otherwise, with star positions propagated from Gaia's J2016
+  epoch to each image's approximate observation epoch.
+
+  Ocean of Stars has a real plate solve (median residual ~0.4 preview px).
+  Cosmos currently uses the linear fallback (good to a handful of pixels);
+  once its preview JPEG is downloaded, refine it by running:
+
+  ```
+  python flask_app/tools/plate_solve.py --image cosmos
+  ```
+
+  and pasting the printed `plate_cx`/`plate_cy` tuples into its `ImageConfig`
+  in `flask_app/images.py`.
 
 ### Setup
 
@@ -37,38 +64,33 @@ subimages at full resolution:
    pip install -r flask_app/requirements.txt
    ```
 
-2. **Download the full-resolution TIFF** (optional but recommended — without
-   it the app still runs, just with the "High res" tab disabled):
-
-   Go to the [NOIRLab image page](https://noirlab.edu/public/images/noirlab2616a/)
-   and download the **Fullsize Original** (`noirlab2616a.tif`, 9.4 GB), or grab
-   it directly:
-
-   ```
-   https://storage.noirlab.edu/media/archives/images/original/noirlab2616a.tif
-   ```
-
-   Then point the app at it with the `OCEAN_OF_STARS_TIFF` environment
-   variable (default: `C:\Users\thoma\Downloads\noirlab2616a.tif`):
-
-   ```
-   set OCEAN_OF_STARS_TIFF=D:\path\to\noirlab2616a.tif
-   ```
-
-   The preview JPEG (the 4000 × 2123 "Publication JPEG" from the same page)
-   is already bundled at `flask_app/static/img/ocean_of_stars.jpg`.
-
-3. Run the app and open http://localhost:5000:
+2. Run the app and open http://localhost:5000:
 
    ```
    python flask_app/app.py
    ```
 
+   Ocean of Stars' preview JPEG is already bundled at
+   `flask_app/static/img/ocean_of_stars.jpg`. Every other image/file —
+   Cosmos's preview JPEG, and both images' full-resolution TIFFs — is fetched
+   on demand from the app's UI the first time you select it, and cached
+   locally (`flask_app/static/img/` for previews, `flask_app/data/` for
+   TIFFs) so it's only downloaded once.
+
+   To point a full-res TIFF at a file you already downloaded elsewhere
+   instead, set its environment variable before starting the app:
+
+   ```
+   set OCEAN_OF_STARS_TIFF=D:\path\to\noirlab2616a.tif
+   set COSMOS_TIFF=D:\path\to\noirlab2618a.tif
+   ```
+
 The Gaia star table needs internet access (it queries
-`gea.esac.esa.int` live); everything else is local.
+`gea.esac.esa.int` live), as does any in-app download; everything else is
+local.
 
 ### Credits
 
-Image: NSF–DOE Vera C. Rubin Observatory / NOIRLab / SLAC / AURA
+Images: NSF–DOE Vera C. Rubin Observatory / NOIRLab / SLAC / AURA
 ([usage terms](https://noirlab.edu/public/copyright/)).
 Star data: ESA [Gaia](https://www.cosmos.esa.int/gaia) DR3.

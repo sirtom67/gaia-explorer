@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Ocean of Stars Explorer</title>
+<title>Rubin Observatory Subimage Explorer</title>
 <style>
   :root { color-scheme: dark; }
   body {
@@ -74,6 +74,52 @@
   button:disabled { background: #333; cursor: not-allowed; color: #777; }
   button:hover:not(:disabled) { background: #4a6fdc; }
   #hint { font-size: 0.8rem; color: #9a9ab0; margin-top: 8px; }
+
+  /* --- Image picker --- */
+  .image-picker {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+  .image-card {
+    width: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    background: #14162c;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 16px;
+    min-width: 180px;
+    cursor: pointer;
+  }
+  .image-card:hover:not(:disabled) { background: #1a1d3a; }
+  .image-card.active { border-color: #3a5fcc; background: #1a1d3a; }
+  .image-card-title { font-weight: 600; font-size: 0.95rem; color: #e8e8f0; }
+  .image-card-status { font-size: 0.72rem; color: #9a9ab0; }
+  .image-card.active .image-card-status { color: #8ab4f8; }
+  .image-card-status.pending { color: #ffd54a; }
+
+  /* --- Download panels --- */
+  .progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .progress-track {
+    flex: 1 1 auto;
+    height: 8px;
+    background: #24263c;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .progress-bar { height: 100%; width: 0%; background: #3a5fcc; transition: width 0.2s; }
+  .progress-label { font-size: 0.78rem; color: #9a9ab0; white-space: nowrap; }
+  .download-hint { font-size: 0.85rem; color: #9a9ab0; margin: 4px 0 12px; }
+  .download-btn { width: auto; padding: 10px 20px; }
 
   /* Subimage result section - deliberately spans the full page width so it
      renders at least as large as the preview map above. */
@@ -268,19 +314,33 @@
 
 <div class="page">
 
-<h1>{{ info.title }} &mdash; Subimage Explorer</h1>
-<p class="subtitle">
-  Full frame: {{ info.width }} &times; {{ info.height }} px (preview) &middot;
-  field of view {{ info.field_of_view }} &middot;
-  center RA {{ info.center_ra }}, Dec {{ info.center_dec }} &middot;
-  Credit: {{ info.credit }} &middot;
-  <a href="{{ info.source_url }}" target="_blank" rel="noopener">source</a>
-</p>
+<h1>Vera C. Rubin Observatory &mdash; Subimage Explorer</h1>
+<p class="subtitle">Pick an image below, drag-select a region, and pull out subimages with live Gaia DR3 star data. Star data: ESA Gaia DR3.</p>
+
+<div class="image-picker" id="imagePicker">
+  <p class="crop-loading">Loading images...</p>
+</div>
+
+<div id="downloadPanel" style="display:none;">
+  <fieldset>
+    <legend id="downloadTitle">Preview not downloaded</legend>
+    <p class="download-hint" id="downloadHint"></p>
+    <button class="download-btn" id="downloadBtn">Download preview</button>
+    <div class="progress-wrap" id="downloadProgressWrap" style="display:none;">
+      <div class="progress-track"><div class="progress-bar" id="downloadProgressBar"></div></div>
+      <div class="progress-label" id="downloadProgressLabel"></div>
+    </div>
+    <p class="crop-error" id="downloadError" style="display:none;"></p>
+  </fieldset>
+</div>
+
+<div id="explorerRoot" style="display:none;">
+<p class="subtitle" id="imageSubtitle"></p>
 
 <div class="layout">
   <div class="preview-panel">
     <div id="previewWrap">
-      <img id="previewImg" src="{{ url_for('static', filename='img/ocean_of_stars.jpg') }}" alt="Ocean of Stars full frame">
+      <img id="previewImg" alt="Full frame preview">
       <div id="selectionBox"></div>
     </div>
     <p id="hint">Click and drag on the image to select a region.</p>
@@ -321,7 +381,7 @@
 
       <div class="tab-panel" id="panel-hires">
         <div class="crop-meta" id="hiresMeta"></div>
-        <p class="crop-loading" id="hiresStatus"></p>
+        <div class="crop-loading" id="hiresStatus"></div>
         <div class="crop-img-wrap" id="hiresImgWrap" style="display:none;">
           <img id="hiresImg" alt="High-res subimage">
           <div class="star-marker" id="hiresMarker"></div>
@@ -336,7 +396,7 @@
       <fieldset>
         <legend>Sky area covered</legend>
         <div class="sky-region-box" id="skyRegionBox">-</div>
-        <div class="approx-note">Plate solution fit against real Gaia DR3 star positions (gnomonic projection + fitted rotation/scale); accurate to a few pixels across the whole frame, including the corners.</div>
+        <div class="approx-note" id="plateApproxNote">Plate solution fit against real Gaia DR3 star positions (gnomonic projection + fitted rotation/scale); accurate to a few pixels across the whole frame, including the corners.</div>
       </fieldset>
 
       <fieldset>
@@ -347,10 +407,25 @@
     </div>
   </div>
 </div>
+</div>
 
 </div>
 
 <script>
+const imagePicker = document.getElementById('imagePicker');
+const downloadPanel = document.getElementById('downloadPanel');
+const downloadTitle = document.getElementById('downloadTitle');
+const downloadHint = document.getElementById('downloadHint');
+const downloadBtn = document.getElementById('downloadBtn');
+const downloadProgressWrap = document.getElementById('downloadProgressWrap');
+const downloadProgressBar = document.getElementById('downloadProgressBar');
+const downloadProgressLabel = document.getElementById('downloadProgressLabel');
+const downloadError = document.getElementById('downloadError');
+
+const explorerRoot = document.getElementById('explorerRoot');
+const imageSubtitle = document.getElementById('imageSubtitle');
+const plateApproxNote = document.getElementById('plateApproxNote');
+
 const previewImg = document.getElementById('previewImg');
 const previewWrap = document.getElementById('previewWrap');
 const selectionBox = document.getElementById('selectionBox');
@@ -376,11 +451,12 @@ const hiresDownload = document.getElementById('hiresDownload');
 const skyRegionBox = document.getElementById('skyRegionBox');
 const starListBody = document.getElementById('starListBody');
 
-const MASTER_WIDTH = {{ info.width }};
-const MASTER_HEIGHT = {{ info.height }};
-const HIRES_AVAILABLE = {{ 'true' if info.hires_available else 'false' }};
-const HIRES_WIDTH = {{ info.hires_width or 0 }};
-const HIRES_HEIGHT = {{ info.hires_height or 0 }};
+let IMAGES_LIST = [];
+let currentImageKey = null;
+let imgInfo = null; // current /api/info response for currentImageKey
+
+let MASTER_WIDTH = 0, MASTER_HEIGHT = 0;
+let HIRES_AVAILABLE = false, HIRES_WIDTH = 0, HIRES_HEIGHT = 0;
 
 let dragging = false;
 let startX = 0, startY = 0;
@@ -388,6 +464,158 @@ let selection = null; // {x, y, w, h} in preview (low-res) pixel space
 let currentSkyRegion = null;
 let currentStars = [];
 let selectedStarIndex = null;
+
+// --- Formatting helpers ---
+function formatBytes(n) {
+  if (n === null || n === undefined) return null;
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+// --- Image list / picker ---
+async function loadImagesList() {
+  const resp = await fetch('/api/images');
+  IMAGES_LIST = await resp.json();
+  renderImagePicker();
+  if (!currentImageKey) {
+    const firstReady = IMAGES_LIST.find((i) => i.lowres_available);
+    await selectImage((firstReady || IMAGES_LIST[0]).key);
+  }
+}
+
+function renderImagePicker() {
+  imagePicker.innerHTML = IMAGES_LIST.map((img) => {
+    const statusText = img.key === currentImageKey && img.lowres_download_status.status === 'downloading'
+      ? 'Downloading...'
+      : (img.lowres_available ? 'Ready' : 'Not downloaded');
+    const statusClass = img.lowres_available ? '' : ' pending';
+    return `
+    <button class="image-card${img.key === currentImageKey ? ' active' : ''}" data-key="${img.key}" type="button">
+      <span class="image-card-title">${img.title}</span>
+      <span class="image-card-status${statusClass}">${statusText}</span>
+    </button>`;
+  }).join('');
+  imagePicker.querySelectorAll('.image-card').forEach((btn) => {
+    btn.addEventListener('click', () => selectImage(btn.dataset.key));
+  });
+}
+
+async function selectImage(key) {
+  currentImageKey = key;
+  selection = null;
+  cropBoxes = null;
+  currentSkyRegion = null;
+  currentStars = [];
+  selectedStarIndex = null;
+  cropSection.style.display = 'none';
+  selectionBox.style.display = 'none';
+  cropBtn.disabled = true;
+  await refreshImageInfo();
+}
+
+async function refreshImageInfo() {
+  const resp = await fetch('/api/info?image=' + encodeURIComponent(currentImageKey));
+  imgInfo = await resp.json();
+  renderImagePicker();
+  if (!imgInfo.lowres_available) {
+    showDownloadPanel();
+  } else {
+    showExplorer();
+  }
+}
+
+function showDownloadPanel() {
+  explorerRoot.style.display = 'none';
+  downloadPanel.style.display = 'block';
+  downloadTitle.textContent = `${imgInfo.title} — preview not downloaded yet`;
+  const sizeStr = formatBytes(imgInfo.lowres_size_hint_bytes);
+  downloadHint.textContent = `Fetch the low-res preview JPEG from NOIRLab${sizeStr ? ` (~${sizeStr})` : ''} to start exploring this image.`;
+  downloadBtn.disabled = false;
+  downloadBtn.textContent = 'Download preview';
+  downloadProgressWrap.style.display = 'none';
+  downloadError.style.display = 'none';
+}
+
+function showExplorer() {
+  downloadPanel.style.display = 'none';
+  explorerRoot.style.display = 'block';
+
+  MASTER_WIDTH = imgInfo.lowres_width;
+  MASTER_HEIGHT = imgInfo.lowres_height;
+  HIRES_AVAILABLE = imgInfo.hires_available;
+  HIRES_WIDTH = imgInfo.hires_width || 0;
+  HIRES_HEIGHT = imgInfo.hires_height || 0;
+
+  imageSubtitle.innerHTML = `
+    <strong>${imgInfo.title}</strong> &middot;
+    Full frame: ${MASTER_WIDTH} &times; ${MASTER_HEIGHT} px (preview) &middot;
+    field of view ${imgInfo.field_of_view} &middot;
+    center RA ${imgInfo.center_ra}, Dec ${imgInfo.center_dec} &middot;
+    Credit: ${imgInfo.credit} &middot;
+    <a href="${imgInfo.source_url}" target="_blank" rel="noopener">source</a>`;
+
+  previewImg.src = `/static/img/${imgInfo.lowres_filename}`;
+
+  // reset selection UI for the newly-selected image
+  valX.textContent = valY.textContent = valW.textContent = valH.textContent = '-';
+  cropBtn.disabled = true;
+  cropSection.style.display = 'none';
+}
+
+function updateProgressUI(barEl, labelEl, st) {
+  if (st.total > 0) {
+    const pct = Math.min(100, (st.bytes / st.total) * 100);
+    barEl.style.width = pct.toFixed(1) + '%';
+    labelEl.textContent = `${formatBytes(st.bytes)} / ${formatBytes(st.total)} (${pct.toFixed(0)}%)`;
+  } else {
+    barEl.style.width = '100%';
+    labelEl.textContent = `${formatBytes(st.bytes)} downloaded...`;
+  }
+}
+
+function pollDownload(key, which, onProgress) {
+  return new Promise((resolve, reject) => {
+    const iv = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/download/${key}/${which}/status`);
+        const st = await resp.json();
+        onProgress(st);
+        if (st.status === 'done') { clearInterval(iv); resolve(st); }
+        else if (st.status === 'error') { clearInterval(iv); reject(new Error(st.error || 'download failed')); }
+      } catch (err) {
+        clearInterval(iv);
+        reject(err);
+      }
+    }, 800);
+  });
+}
+
+async function startDownload(key, which, onProgress) {
+  const resp = await fetch(`/api/download/${key}/${which}`, { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || resp.statusText);
+  return pollDownload(key, which, onProgress);
+}
+
+downloadBtn.addEventListener('click', async () => {
+  const key = currentImageKey;
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = 'Downloading...';
+  downloadProgressWrap.style.display = 'flex';
+  downloadError.style.display = 'none';
+  try {
+    await startDownload(key, 'lowres', (st) => updateProgressUI(downloadProgressBar, downloadProgressLabel, st));
+    await loadImagesList();
+    if (key === currentImageKey) await refreshImageInfo();
+  } catch (err) {
+    downloadError.textContent = `Error: ${err.message}`;
+    downloadError.style.display = 'block';
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = 'Retry download';
+  }
+});
 
 function displayToNatural(px, py) {
   const rect = previewImg.getBoundingClientRect();
@@ -711,7 +939,7 @@ async function loadLowRes(params) {
     lowresImg.src = objectUrl;
     lowresImgWrap.style.display = 'block';
     lowresDownload.href = objectUrl;
-    lowresDownload.download = `ocean_of_stars_lowres_${selection.x}_${selection.y}.jpg`;
+    lowresDownload.download = `${currentImageKey}_lowres_${selection.x}_${selection.y}.jpg`;
     lowresDownload.style.display = 'inline-block';
     lowresStatus.textContent = '';
   } catch (err) {
@@ -720,14 +948,56 @@ async function loadLowRes(params) {
   refreshOverlays();
 }
 
+function renderHiresDownloadPrompt() {
+  hiresMeta.textContent = '';
+  const sizeStr = formatBytes(imgInfo.hires_size_hint_bytes);
+  hiresStatus.innerHTML = `
+    <span>The full-resolution TIFF for "${imgInfo.title}" isn't downloaded yet${sizeStr ? ` (~${sizeStr})` : ''}.
+    This is a large file and may take a while.</span>
+    <br><button class="download-btn" id="hiresDownloadBtn" style="margin-top:10px;">Download full-resolution TIFF</button>
+    <div class="progress-wrap" id="hiresDownloadProgressWrap" style="display:none;">
+      <div class="progress-track"><div class="progress-bar" id="hiresDownloadProgressBar"></div></div>
+      <div class="progress-label" id="hiresDownloadProgressLabel"></div>
+    </div>
+    <p class="crop-error" id="hiresDownloadError" style="display:none;"></p>
+  `;
+  const btn = document.getElementById('hiresDownloadBtn');
+  const wrap = document.getElementById('hiresDownloadProgressWrap');
+  const bar = document.getElementById('hiresDownloadProgressBar');
+  const label = document.getElementById('hiresDownloadProgressLabel');
+  const err = document.getElementById('hiresDownloadError');
+  btn.addEventListener('click', async () => {
+    const key = currentImageKey;
+    btn.disabled = true;
+    btn.textContent = 'Downloading...';
+    wrap.style.display = 'flex';
+    err.style.display = 'none';
+    try {
+      await startDownload(key, 'hires', (st) => updateProgressUI(bar, label, st));
+      if (key !== currentImageKey) return;
+      const infoResp = await fetch('/api/info?image=' + encodeURIComponent(key));
+      imgInfo = await infoResp.json();
+      HIRES_AVAILABLE = imgInfo.hires_available;
+      HIRES_WIDTH = imgInfo.hires_width || 0;
+      HIRES_HEIGHT = imgInfo.hires_height || 0;
+      if (selection) {
+        cropBoxes = computeCropBoxes(selection);
+        const p = new URLSearchParams(selection);
+        p.set('image', currentImageKey);
+        await loadHiRes(p);
+      }
+    } catch (e) {
+      err.textContent = `Error: ${e.message}`;
+      err.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Retry download';
+    }
+  });
+}
+
 async function loadHiRes(params) {
   if (!HIRES_AVAILABLE) {
-    hiresMeta.textContent = '';
-    hiresStatus.innerHTML = `<span class="crop-error">
-      The full-resolution TIFF isn't available on the server. Download it from the
-      NOIRLab source page and set the <code>OCEAN_OF_STARS_TIFF</code> environment
-      variable (or place it at the default path) before starting the app.
-    </span>`;
+    renderHiresDownloadPrompt();
     return;
   }
   hiresStatus.textContent = 'Reading region from the full-resolution TIFF...';
@@ -749,7 +1019,7 @@ async function loadHiRes(params) {
     hiresImg.src = objectUrl;
     hiresImgWrap.style.display = 'block';
     hiresDownload.href = objectUrl;
-    hiresDownload.download = `ocean_of_stars_hires_${selection.x}_${selection.y}.jpg`;
+    hiresDownload.download = `${currentImageKey}_hires_${selection.x}_${selection.y}.jpg`;
     hiresDownload.style.display = 'inline-block';
     hiresStatus.textContent = '';
   } catch (err) {
@@ -758,12 +1028,47 @@ async function loadHiRes(params) {
   refreshOverlays();
 }
 
+// Keep in sync with the Gaia request timeout in app.py's /api/stars route.
+const GAIA_QUERY_TIMEOUT_S = 60;
+
+let starsCountdownTimer = null;
+
+function stopStarsCountdown() {
+  if (starsCountdownTimer) {
+    clearInterval(starsCountdownTimer);
+    starsCountdownTimer = null;
+  }
+}
+
+function startStarsCountdown() {
+  stopStarsCountdown();
+  const textEl = starListBody.querySelector('.gaia-countdown-text');
+  const barEl = starListBody.querySelector('.gaia-countdown-bar');
+  if (!textEl) return;
+  const startedAt = Date.now();
+  const tick = () => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const remaining = Math.max(0, Math.round(GAIA_QUERY_TIMEOUT_S - elapsed));
+    textEl.textContent = remaining > 0
+      ? `Querying Gaia DR3 for this sky region... (up to ${remaining}s)`
+      : 'Still waiting for the Gaia archive to respond...';
+    if (barEl) barEl.style.width = Math.max(0, (remaining / GAIA_QUERY_TIMEOUT_S) * 100) + '%';
+  };
+  tick();
+  starsCountdownTimer = setInterval(tick, 1000);
+}
+
 async function loadStars(params) {
-  starListBody.innerHTML = '<p class="crop-loading">Querying Gaia DR3 for this sky region...</p>';
+  starListBody.innerHTML = `
+    <p class="crop-loading gaia-countdown-text"></p>
+    <div class="progress-wrap">
+      <div class="progress-track"><div class="progress-bar gaia-countdown-bar" style="width:100%"></div></div>
+    </div>`;
   skyRegionBox.innerHTML = '<p class="crop-loading">Computing...</p>';
   selectedStarIndex = null;
   currentStars = [];
   currentSkyRegion = null;
+  startStarsCountdown();
   try {
     const resp = await fetch('/api/stars?' + params.toString());
     const data = await resp.json();
@@ -780,6 +1085,8 @@ async function loadStars(params) {
   } catch (err) {
     skyRegionBox.innerHTML = `<span class="crop-error">Error: ${err.message}</span>`;
     starListBody.innerHTML = '';
+  } finally {
+    stopStarsCountdown();
   }
   refreshOverlays();
 }
@@ -792,6 +1099,7 @@ async function doExtract() {
   cropBoxes = computeCropBoxes(selection);
 
   const params = new URLSearchParams(selection);
+  params.set('image', currentImageKey);
   await Promise.all([loadLowRes(params), loadHiRes(params), loadStars(params)]);
 
   cropBtn.disabled = false;
@@ -914,6 +1222,8 @@ window.addEventListener('mouseup', (e) => {
 
 attachZoomDrag('lowres', lowresImgWrap, lowresImg, lowresZoomBox);
 attachZoomDrag('hires', hiresImgWrap, hiresImg, hiresZoomBox);
+
+loadImagesList();
 </script>
 
 </body>

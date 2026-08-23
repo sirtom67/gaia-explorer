@@ -1,7 +1,7 @@
-"""Plate-solve the Ocean of Stars preview JPEG against real Gaia DR3 positions.
+"""Plate-solve a registered image's preview JPEG against real Gaia DR3 positions.
 
-Produces the PLATE_CX / PLATE_CY polynomial coefficients hardcoded in app.py.
-Re-run this if the preview JPEG is ever regenerated at a different size/crop.
+Produces the plate_cx / plate_cy polynomial coefficients to paste into the
+image's ImageConfig in images.py.
 
 History: an earlier version of this script used ~150 stars (G<13) and fit a
 rigid (rotation+scale+translation) transform. That gave a good *average* fit
@@ -12,32 +12,35 @@ users noticed markers landing visibly off-star in some crops. This version
 uses ~4500 stars (G<14.5) spanning the whole frame and fits a degree-3
 polynomial distortion on top of the gnomonic/TAN projection (similar to a
 SIP-distorted WCS), cutting the residual to median ~0.4px, max ~2.5px
-everywhere tested, including the previously-bad region.
+everywhere tested (for Ocean of Stars; results will vary per image).
 
 Approach:
 1. Query all Gaia stars (G < 14.5) across the field - dense, full coverage.
 2. Detect point-source peaks across the whole lowres JPEG (brightness
    threshold + connected-component labeling, peak pixel per blob).
-3. Match each Gaia star to the nearest detected peak using the *current*
-   plate solution (from app.py) as the seed, with a tight match radius.
+3. Match each Gaia star to the nearest detected peak using a seed plate
+   solution (the image's hardcoded fit if it has one, otherwise the linear
+   fallback), with a tight match radius.
 4. Fit a degree-3 polynomial (in gnomonic xi/eta) to observed pixel
    positions via linear least squares, with iterative outlier rejection.
 
-Usage: python plate_solve.py
+Usage: python plate_solve.py [--image KEY]
+  KEY is one of the keys in images.IMAGES (default: ocean_of_stars). The
+  target image's low-res JPEG must already be downloaded (via the app's UI,
+  or manually to flask_app/static/img/<filename>).
 """
+import argparse
 import math
+import sys
+from pathlib import Path
 
 import numpy as np
 import requests
 from PIL import Image
 from scipy import ndimage
 
-MASTER_JPG = "../static/img/ocean_of_stars.jpg"
-
-RA0_DEG = 224.76984640789192
-DEC0_DEG = -37.939446521397656
-RA0 = math.radians(RA0_DEG)
-DEC0 = math.radians(DEC0_DEG)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from images import IMAGES, linear_plate_solution  # noqa: E402
 
 GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
 MAG_LIMIT = 14.5
@@ -45,21 +48,13 @@ DETECT_THRESHOLD = 200
 MATCH_RADIUS_PX = 8
 POLY_DEGREE = 3
 
-# Current plate solution (from app.py), used only to seed the search.
-_SEED_CX = (1999.7636315234488, -73088.16239545682, 97.47720777489019,
-            -2427.235450950923, -4.351627915670664, -169.98195207141725,
-            86835.41713612381, 1921.6427119784203, 676.4196286585695, -18562.04584138326)
-_SEED_CY = (1060.9556173595986, -98.86461543816775, -73115.4770637289,
-            -1220.0426883027787, -885.956838531343, 18.552137270575322,
-            -8218.147610689712, 102.28652799927075, 1529.3802893802067, 8569.652326636984)
 
-
-def gnomonic(ra_deg, dec_deg):
+def gnomonic(ra_deg, dec_deg, ra0, dec0):
     ra, dec = math.radians(ra_deg), math.radians(dec_deg)
-    dra = ra - RA0
-    denom = math.sin(DEC0) * math.sin(dec) + math.cos(DEC0) * math.cos(dec) * math.cos(dra)
+    dra = ra - ra0
+    denom = math.sin(dec0) * math.sin(dec) + math.cos(dec0) * math.cos(dec) * math.cos(dra)
     xi = math.cos(dec) * math.sin(dra) / denom
-    eta = (math.cos(DEC0) * math.sin(dec) - math.sin(DEC0) * math.cos(dec) * math.cos(dra)) / denom
+    eta = (math.cos(dec0) * math.sin(dec) - math.sin(dec0) * math.cos(dec) * math.cos(dra)) / denom
     return xi, eta
 
 
@@ -72,16 +67,16 @@ def design_row(xi, eta, degree):
     return terms
 
 
-def seed_predict(ra, dec):
-    xi, eta = gnomonic(ra, dec)
+def seed_predict(ra, dec, ra0, dec0, seed_cx, seed_cy):
+    xi, eta = gnomonic(ra, dec, ra0, dec0)
     row = design_row(xi, eta, POLY_DEGREE)
-    return sum(c * r for c, r in zip(_SEED_CX, row)), sum(c * r for c, r in zip(_SEED_CY, row))
+    return sum(c * r for c, r in zip(seed_cx, row)), sum(c * r for c, r in zip(seed_cy, row))
 
 
-def fit(matches, degree):
+def fit(matches, degree, ra0, dec0):
     xis, etas, oxs, oys = [], [], [], []
     for m in matches:
-        xi, eta = gnomonic(m["ra"], m["dec"])
+        xi, eta = gnomonic(m["ra"], m["dec"], ra0, dec0)
         xis.append(xi); etas.append(eta); oxs.append(m["obs_x"]); oys.append(m["obs_y"])
     xis, etas, oxs, oys = map(np.array, (xis, etas, oxs, oys))
     rows = [design_row(x, e, degree) for x, e in zip(xis, etas)]
@@ -103,15 +98,32 @@ def fit(matches, degree):
 
 
 def main():
-    img = Image.open(MASTER_JPG)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--image", default="ocean_of_stars", choices=sorted(IMAGES),
+                         help="image key from images.py (default: ocean_of_stars)")
+    args = parser.parse_args()
+    cfg = IMAGES[args.image]
+
+    if not cfg.lowres_path.exists():
+        sys.exit(f"{cfg.lowres_path} doesn't exist yet - download it first (via the app's UI, or manually).")
+
+    ra0_deg, dec0_deg = cfg.center_ra_deg, cfg.center_dec_deg
+    ra0, dec0 = math.radians(ra0_deg), math.radians(dec0_deg)
+
+    img = Image.open(cfg.lowres_path)
     master_w, master_h = img.size
 
-    half_w_deg = 2.05
-    half_h_deg = 0.95
+    if cfg.plate_cx is not None:
+        seed_cx, seed_cy = cfg.plate_cx, cfg.plate_cy
+    else:
+        seed_cx, seed_cy = linear_plate_solution(master_w, master_h, cfg.field_of_view_arcmin)
+
+    half_w_deg = cfg.field_of_view_arcmin[0] / 60.0 / 2.0 + 0.1
+    half_h_deg = cfg.field_of_view_arcmin[1] / 60.0 / 2.0 + 0.1
     adql = (
         f"SELECT source_id, ra, dec, phot_g_mean_mag FROM gaiadr3.gaia_source "
-        f"WHERE ra BETWEEN {RA0_DEG - half_w_deg} AND {RA0_DEG + half_w_deg} "
-        f"AND dec BETWEEN {DEC0_DEG - half_h_deg} AND {DEC0_DEG + half_h_deg} "
+        f"WHERE ra BETWEEN {ra0_deg - half_w_deg} AND {ra0_deg + half_w_deg} "
+        f"AND dec BETWEEN {dec0_deg - half_h_deg} AND {dec0_deg + half_h_deg} "
         f"AND phot_g_mean_mag < {MAG_LIMIT} ORDER BY phot_g_mean_mag ASC"
     )
     resp = requests.get(GAIA_TAP_URL, params={
@@ -132,7 +144,7 @@ def main():
 
     matches = []
     for source_id, ra, dec, mag in rows:
-        pred_x, pred_y = seed_predict(ra, dec)
+        pred_x, pred_y = seed_predict(ra, dec, ra0, dec0, seed_cx, seed_cy)
         if not (0 <= pred_x < master_w and 0 <= pred_y < master_h):
             continue
         d = np.hypot(peak_xy[:, 0] - pred_x, peak_xy[:, 1] - pred_y)
@@ -143,19 +155,20 @@ def main():
     print(f"{len(matches)} matched within {MATCH_RADIUS_PX}px of seed prediction")
 
     cur = matches
-    cx, cy, resid = fit(cur, POLY_DEGREE)
+    cx, cy, resid = fit(cur, POLY_DEGREE, ra0, dec0)
     print(f"Round 1: n={len(cur)} mean={resid.mean():.3f} median={np.median(resid):.3f} max={resid.max():.3f}")
     for _ in range(3):
         keep = resid <= max(2.5, np.median(resid) * 4)
         if keep.all():
             break
         cur = [m for m, k in zip(cur, keep) if k]
-        cx, cy, resid = fit(cur, POLY_DEGREE)
+        cx, cy, resid = fit(cur, POLY_DEGREE, ra0, dec0)
         print(f"Round: n={len(cur)} mean={resid.mean():.3f} median={np.median(resid):.3f} max={resid.max():.3f}")
 
     print()
-    print(f"PLATE_CX = {tuple(cx)!r}")
-    print(f"PLATE_CY = {tuple(cy)!r}")
+    print(f"Paste into images.py IMAGES[{args.image!r}]:")
+    print(f"plate_cx = {tuple(cx)!r}")
+    print(f"plate_cy = {tuple(cy)!r}")
     print(f"scale arcsec/px = {206264.80624709636 / math.hypot(cx[1], cx[2])!r}")
 
 

@@ -2,3 +2,13 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Full-resolution TIFFs and *.part downloads-in-progress, fetched on demand
+# by the app (see images.py) rather than committed.
+data/
+*.part
+
+# Low-res preview JPEGs are also fetched on demand, except the one already
+# bundled in the repo.
+static/img/*.jpg
+!static/img/ocean_of_stars.jpg

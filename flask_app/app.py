@@ -1,138 +1,138 @@
-"""Flask GUI for browsing and cropping the Rubin Observatory "Ocean of Stars" image.
+"""Flask GUI for browsing and cropping Rubin Observatory images.
 
-Two sources are used:
-- a small "low-res" JPEG (bundled in the repo) used for the on-screen preview map
-- an optional full-resolution 16-bit TIFF (56428 x 29949 px, ~10 GB) that the user
-  downloads separately, opened via a numpy memmap so cropping never loads the
-  whole file into RAM.
+The registered images (see images.py) are NSF-DOE Vera C. Rubin Observatory
+LSSTCam releases. Each has two sources:
+- a small "low-res" JPEG used for the on-screen preview map
+- an optional full-resolution 16-bit TIFF (tens of thousands of px per side,
+  ~10 GB) opened via a numpy memmap so cropping never loads the whole file
+  into RAM.
+
+Neither file needs to be present on disk at startup - both can be fetched
+on demand from the UI (see images.start_download).
 """
 import logging
 import math
-import os
+import xml.etree.ElementTree as ET
 from io import BytesIO
-from pathlib import Path
 
 import numpy as np
 import requests
-import tifffile
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
+
+from images import IMAGE_STATES, IMAGES, MAX_HIRES_OUTPUT_DIM, get_download_status, start_download
 
 logging.getLogger("tifffile").setLevel(logging.ERROR)
 
-# Plate solution. The tangent point (RA0/DEC0) is the image's published field
-# center. An initial fit using ~150 bright (G<13) stars gave a good *average*
-# fit (median ~1px residual) but was locally biased by several pixels in
-# under-sampled parts of the frame - a rigid (rotation+scale+translation)
-# transform fit from too few, too-sparse points can't average out local noise.
-# The fit below instead uses ~4500 stars (G<14.5) spanning the entire frame,
-# matched to their detected pixel peaks, with a degree-3 polynomial distortion
-# term on top of the gnomonic/TAN projection (silimar to a SIP-distorted WCS).
-# Residual after fitting: median ~0.4 px, max ~2.5 px across the whole frame
-# (see flask_app/tools/plate_solve.py).
-RA0_DEG = 224.76984640789192
-DEC0_DEG = -37.939446521397656
-_RA0 = math.radians(RA0_DEG)
-_DEC0 = math.radians(DEC0_DEG)
-
-# xi/eta (gnomonic radians) -> pixel, via a degree-3 polynomial in (xi, eta):
-# basis = [1, xi, eta, xi^2, xi*eta, eta^2, xi^3, xi^2*eta, xi*eta^2, eta^3]
-# px = PLATE_CX . basis   py = PLATE_CY . basis
-PLATE_CX = (
-    1999.7636315234488, -73088.16239545682, 97.47720777489019,
-    -2427.235450950923, -4.351627915670664, -169.98195207141725,
-    86835.41713612381, 1921.6427119784203, 676.4196286585695, -18562.04584138326,
-)
-PLATE_CY = (
-    1060.9556173595986, -98.86461543816775, -73115.4770637289,
-    -1220.0426883027787, -885.956838531343, 18.552137270575322,
-    -8218.147610689712, 102.28652799927075, 1529.3802893802067, 8569.652326636984,
-)
-PLATE_ARCSEC_PER_PX = 206264.80624709636 / math.hypot(PLATE_CX[1], PLATE_CX[2])
-
+# Primary: an IVOA Cone Search mirror of Gaia DR3 (VOTable XML). Fallback:
+# ESA's own TAP sync endpoint (JSON). The cone search mirror is used first -
+# some networks (corporate proxies/firewalls) can reach the rest of
+# gea.esac.esa.int fine but silently hang on requests to its TAP sync path
+# specifically, while the plain HTTPS cone search mirror goes through.
+GAIA_CONE_URL = "https://gaia.ari.uni-heidelberg.de/cone/search"
 GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
 LIGHT_YEARS_PER_PARSEC = 3.26156
-GAIA_EPOCH = 2016.0    # gaiadr3.gaia_source reference epoch (Julian year)
-IMAGE_EPOCH = 2025.5   # approximate observation epoch of the Ocean of Stars image
-
-BASE_DIR = Path(__file__).resolve().parent
-MASTER_IMAGE_PATH = BASE_DIR / "static" / "img" / "ocean_of_stars.jpg"
-
-# Full-resolution TIFF downloaded separately (see README) - not part of the repo.
-HIRES_TIFF_PATH = Path(
-    os.environ.get("OCEAN_OF_STARS_TIFF", r"C:\Users\thoma\Downloads\noirlab2616a.tif")
-)
-
-# Cap on the largest dimension we'll ever materialize/send for a hi-res crop,
-# so a huge drag selection can't try to read gigabytes at once.
-MAX_HIRES_OUTPUT_DIM = 4000
+GAIA_EPOCH = 2016.0  # gaiadr3.gaia_source reference epoch (Julian year)
 
 app = Flask(__name__)
 
-_master_image = Image.open(MASTER_IMAGE_PATH)
-_master_image.load()
-MASTER_WIDTH, MASTER_HEIGHT = _master_image.size
 
-_hires_mmap = None
-HIRES_WIDTH = HIRES_HEIGHT = None
-HIRES_AVAILABLE = False
+def _get_state(key):
+    state = IMAGE_STATES.get(key)
+    if state is None:
+        abort(404, description=f"Unknown image {key!r}. Known images: {sorted(IMAGES)}")
+    return state
 
-if HIRES_TIFF_PATH.exists():
-    try:
-        _hires_mmap = tifffile.memmap(str(HIRES_TIFF_PATH))
-        HIRES_HEIGHT, HIRES_WIDTH = _hires_mmap.shape[0], _hires_mmap.shape[1]
-        HIRES_AVAILABLE = True
-    except Exception as exc:  # noqa: BLE001 - report and keep running without hi-res
-        print(f"Could not open hi-res TIFF at {HIRES_TIFF_PATH}: {exc}")
-else:
-    print(f"Hi-res TIFF not found at {HIRES_TIFF_PATH} - high-res tab will be disabled.")
 
-IMAGE_INFO = {
-    "width": MASTER_WIDTH,
-    "height": MASTER_HEIGHT,
-    "title": "Ocean of Stars",
-    "credit": "NSF-DOE Vera C. Rubin Observatory/NOIRLab/SLAC/AURA",
-    "source_url": "https://noirlab.edu/public/images/noirlab2616a/",
-    "field_of_view": "188.33 x 99.95 arcminutes",
-    "center_ra": "14h 59m 04.76s",
-    "center_dec": "-37 56 22.01",
-    "hires_available": HIRES_AVAILABLE,
-    "hires_width": HIRES_WIDTH,
-    "hires_height": HIRES_HEIGHT,
-    "hires_path": str(HIRES_TIFF_PATH),
-}
+def _require_lowres(state):
+    if not state.lowres_available:
+        return jsonify({
+            "error": f"The low-res preview for \"{state.cfg.title}\" hasn't been downloaded yet.",
+            "needs_download": "lowres",
+        }), 503
+    return None
 
 
 @app.route("/")
 def index():
-    return render_template("index.html", info=IMAGE_INFO)
+    return render_template("index.html")
+
+
+def _image_summary(state):
+    cfg = state.cfg
+    return {
+        "key": cfg.key,
+        "title": cfg.title,
+        "credit": cfg.credit,
+        "source_url": cfg.source_url,
+        "field_of_view": f"{cfg.field_of_view_arcmin[0]:.2f} x {cfg.field_of_view_arcmin[1]:.2f} arcminutes",
+        "center_ra": format_ra(cfg.center_ra_deg),
+        "center_dec": format_dec(cfg.center_dec_deg),
+        "lowres_available": state.lowres_available,
+        "lowres_filename": cfg.lowres_filename,
+        "lowres_width": state.lowres_width,
+        "lowres_height": state.lowres_height,
+        "lowres_size_hint_bytes": cfg.lowres_size_hint_bytes,
+        "hires_available": state.hires_available,
+        "hires_width": state.hires_width,
+        "hires_height": state.hires_height,
+        "hires_size_hint_bytes": cfg.hires_size_hint_bytes,
+        "hires_path": str(cfg.hires_path),
+        "lowres_download_status": get_download_status(cfg.key, "lowres"),
+        "hires_download_status": get_download_status(cfg.key, "hires"),
+    }
+
+
+@app.route("/api/images")
+def api_images():
+    return jsonify([_image_summary(state) for state in IMAGE_STATES.values()])
 
 
 @app.route("/api/info")
 def api_info():
-    return jsonify(IMAGE_INFO)
+    state = _get_state(request.args.get("image", ""))
+    return jsonify(_image_summary(state))
 
 
-def _gnomonic_forward(ra_deg, dec_deg):
+@app.route("/api/download/<key>/<which>", methods=["POST"])
+def api_download_start(key, which):
+    if which not in ("lowres", "hires"):
+        return jsonify({"error": "which must be 'lowres' or 'hires'"}), 400
+    state = _get_state(key)
+    if (which == "lowres" and state.lowres_available) or (which == "hires" and state.hires_available):
+        return jsonify({"error": "already downloaded"}), 409
+    started, message = start_download(key, which)
+    if not started and message != "already downloading":
+        return jsonify({"error": message}), 400
+    return jsonify({"status": "started"})
+
+
+@app.route("/api/download/<key>/<which>/status")
+def api_download_status(key, which):
+    _get_state(key)  # validates key
+    return jsonify(get_download_status(key, which))
+
+
+def _gnomonic_forward(ra_deg, dec_deg, ra0_rad, dec0_rad):
     """Standard TAN/gnomonic projection: (ra_deg, dec_deg) -> (xi, eta) in radians."""
     ra = math.radians(ra_deg)
     dec = math.radians(dec_deg)
-    dra = ra - _RA0
-    denom = math.sin(_DEC0) * math.sin(dec) + math.cos(_DEC0) * math.cos(dec) * math.cos(dra)
+    dra = ra - ra0_rad
+    denom = math.sin(dec0_rad) * math.sin(dec) + math.cos(dec0_rad) * math.cos(dec) * math.cos(dra)
     xi = math.cos(dec) * math.sin(dra) / denom
-    eta = (math.cos(_DEC0) * math.sin(dec) - math.sin(_DEC0) * math.cos(dec) * math.cos(dra)) / denom
+    eta = (math.cos(dec0_rad) * math.sin(dec) - math.sin(dec0_rad) * math.cos(dec) * math.cos(dra)) / denom
     return xi, eta
 
 
-def _gnomonic_inverse(xi, eta):
+def _gnomonic_inverse(xi, eta, ra0_rad, dec0_rad):
     """Inverse of _gnomonic_forward: (xi, eta) radians -> (ra_deg, dec_deg)."""
     rho = math.hypot(xi, eta)
     if rho < 1e-12:
-        return RA0_DEG, DEC0_DEG
+        return math.degrees(ra0_rad), math.degrees(dec0_rad)
     c = math.atan(rho)
     sin_c, cos_c = math.sin(c), math.cos(c)
-    dec = math.asin(cos_c * math.sin(_DEC0) + (eta * sin_c * math.cos(_DEC0)) / rho)
-    ra = _RA0 + math.atan2(xi * sin_c, rho * math.cos(_DEC0) * cos_c - eta * math.sin(_DEC0) * sin_c)
+    dec = math.asin(cos_c * math.sin(dec0_rad) + (eta * sin_c * math.cos(dec0_rad)) / rho)
+    ra = ra0_rad + math.atan2(xi * sin_c, rho * math.cos(dec0_rad) * cos_c - eta * math.sin(dec0_rad) * sin_c)
     return math.degrees(ra), math.degrees(dec)
 
 
@@ -148,35 +148,35 @@ def _poly_basis_deriv(xi, eta):
     return d_dxi, d_deta
 
 
-def radec_to_lowres_pixel(ra, dec):
+def radec_to_lowres_pixel(ra, dec, ra0_rad, dec0_rad, plate_cx, plate_cy):
     """Plate-solved conversion, (ra_deg, dec_deg) -> low-res preview pixel."""
-    xi, eta = _gnomonic_forward(ra, dec)
+    xi, eta = _gnomonic_forward(ra, dec, ra0_rad, dec0_rad)
     basis = _poly_basis(xi, eta)
-    px = sum(c * b for c, b in zip(PLATE_CX, basis))
-    py = sum(c * b for c, b in zip(PLATE_CY, basis))
+    px = sum(c * b for c, b in zip(plate_cx, basis))
+    py = sum(c * b for c, b in zip(plate_cy, basis))
     return px, py
 
 
-def lowres_pixel_to_radec(px, py):
+def lowres_pixel_to_radec(px, py, ra0_rad, dec0_rad, plate_cx, plate_cy):
     """Inverse of radec_to_lowres_pixel, via Newton's method (the polynomial
     distortion has no closed-form inverse). Converges in a couple of
     iterations since distortion is a small correction on the dominant
     linear term."""
-    a, b, c, d = PLATE_CX[1], PLATE_CX[2], PLATE_CY[1], PLATE_CY[2]
+    a, b, c, d = plate_cx[1], plate_cx[2], plate_cy[1], plate_cy[2]
     det = a * d - b * c
-    dx0, dy0 = px - PLATE_CX[0], py - PLATE_CY[0]
+    dx0, dy0 = px - plate_cx[0], py - plate_cy[0]
     xi = (d * dx0 - b * dy0) / det
     eta = (-c * dx0 + a * dy0) / det
 
     for _ in range(8):
         basis = _poly_basis(xi, eta)
-        fx = sum(cc * bb for cc, bb in zip(PLATE_CX, basis)) - px
-        fy = sum(cc * bb for cc, bb in zip(PLATE_CY, basis)) - py
+        fx = sum(cc * bb for cc, bb in zip(plate_cx, basis)) - px
+        fy = sum(cc * bb for cc, bb in zip(plate_cy, basis)) - py
         d_dxi, d_deta = _poly_basis_deriv(xi, eta)
-        dpx_dxi = sum(cc * bb for cc, bb in zip(PLATE_CX, d_dxi))
-        dpx_deta = sum(cc * bb for cc, bb in zip(PLATE_CX, d_deta))
-        dpy_dxi = sum(cc * bb for cc, bb in zip(PLATE_CY, d_dxi))
-        dpy_deta = sum(cc * bb for cc, bb in zip(PLATE_CY, d_deta))
+        dpx_dxi = sum(cc * bb for cc, bb in zip(plate_cx, d_dxi))
+        dpx_deta = sum(cc * bb for cc, bb in zip(plate_cx, d_deta))
+        dpy_dxi = sum(cc * bb for cc, bb in zip(plate_cy, d_dxi))
+        dpy_deta = sum(cc * bb for cc, bb in zip(plate_cy, d_deta))
         det_j = dpx_dxi * dpy_deta - dpx_deta * dpy_dxi
         if abs(det_j) < 1e-30:
             break
@@ -186,7 +186,13 @@ def lowres_pixel_to_radec(px, py):
         eta += delta_eta
         if abs(delta_xi) < 1e-14 and abs(delta_eta) < 1e-14:
             break
-    return _gnomonic_inverse(xi, eta)
+    return _gnomonic_inverse(xi, eta, ra0_rad, dec0_rad)
+
+
+def _plate_params(state):
+    """(ra0_rad, dec0_rad, plate_cx, plate_cy) for this image's current plate solution."""
+    plate_cx, plate_cy = state.plate_solution()
+    return math.radians(state.cfg.center_ra_deg), math.radians(state.cfg.center_dec_deg), plate_cx, plate_cy
 
 
 # Approximate main-sequence temperature/color -> spectral class boundaries.
@@ -246,12 +252,17 @@ def _parse_box(args, max_w, max_h):
 
 @app.route("/api/crop")
 def api_crop():
+    state = _get_state(request.args.get("image", ""))
+    missing = _require_lowres(state)
+    if missing:
+        return missing
+
     try:
-        x0, y0, x1, y1 = _parse_box(request.args, MASTER_WIDTH, MASTER_HEIGHT)
+        x0, y0, x1, y1 = _parse_box(request.args, state.lowres_width, state.lowres_height)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    crop = _master_image.crop((x0, y0, x1, y1))
+    crop = state.lowres_image.crop((x0, y0, x1, y1))
 
     buf = BytesIO()
     crop.save(buf, format="JPEG", quality=92)
@@ -266,29 +277,34 @@ def api_crop():
 
 @app.route("/api/crop_hires")
 def api_crop_hires():
-    if not HIRES_AVAILABLE:
+    state = _get_state(request.args.get("image", ""))
+    missing = _require_lowres(state)
+    if missing:
+        return missing
+    if not state.hires_available:
         return jsonify({
-            "error": f"Hi-res TIFF not available on the server (expected at {HIRES_TIFF_PATH})."
+            "error": f"Hi-res TIFF not available on the server (expected at {state.cfg.hires_path}).",
+            "needs_download": "hires",
         }), 503
 
     # Incoming x/y/w/h are in low-res preview pixel space; scale to the full TIFF.
     try:
-        lx0, ly0, lx1, ly1 = _parse_box(request.args, MASTER_WIDTH, MASTER_HEIGHT)
+        lx0, ly0, lx1, ly1 = _parse_box(request.args, state.lowres_width, state.lowres_height)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    scale_x = HIRES_WIDTH / MASTER_WIDTH
-    scale_y = HIRES_HEIGHT / MASTER_HEIGHT
+    scale_x = state.hires_width / state.lowres_width
+    scale_y = state.hires_height / state.lowres_height
 
-    x0 = max(0, min(int(lx0 * scale_x), HIRES_WIDTH - 1))
-    y0 = max(0, min(int(ly0 * scale_y), HIRES_HEIGHT - 1))
-    x1 = max(x0 + 1, min(int(lx1 * scale_x), HIRES_WIDTH))
-    y1 = max(y0 + 1, min(int(ly1 * scale_y), HIRES_HEIGHT))
+    x0 = max(0, min(int(lx0 * scale_x), state.hires_width - 1))
+    y0 = max(0, min(int(ly0 * scale_y), state.hires_height - 1))
+    x1 = max(x0 + 1, min(int(lx1 * scale_x), state.hires_width))
+    y1 = max(y0 + 1, min(int(ly1 * scale_y), state.hires_height))
 
     native_w, native_h = x1 - x0, y1 - y0
     step = max(1, math.ceil(max(native_w, native_h) / MAX_HIRES_OUTPUT_DIM))
 
-    region = np.array(_hires_mmap[y0:y1:step, x0:x1:step, :])  # forces the mmap read
+    region = np.array(state.hires_mmap[y0:y1:step, x0:x1:step, :])  # forces the mmap read
     region_8bit = (region >> 8).astype(np.uint8)
 
     crop = Image.fromarray(region_8bit, "RGB")
@@ -307,20 +323,118 @@ def api_crop_hires():
     return resp
 
 
+_GAIA_COLUMNS = ("source_id", "ra", "dec", "phot_g_mean_mag", "pmra", "pmdec", "teff_gspphot", "bp_rp", "parallax")
+
+
+def _votable_local(tag):
+    """Strip the VOTable XML namespace off an ElementTree tag, e.g.
+    '{http://www.ivoa.net/xml/VOTable/v1.3}FIELD' -> 'FIELD'."""
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _parse_votable_rows(xml_bytes, wanted_fields):
+    root = ET.fromstring(xml_bytes)
+    field_names = [el.get("name") for el in root.iter() if _votable_local(el.tag) == "FIELD"]
+    rows = []
+    for tr in root.iter():
+        if _votable_local(tr.tag) != "TR":
+            continue
+        values = [td.text for td in tr if _votable_local(td.tag) == "TD"]
+        row = dict(zip(field_names, values))
+        rows.append({k: row.get(k) for k in wanted_fields})
+    return rows
+
+
+def _to_float(v):
+    if v is None or v == "":
+        return None
+    return float(v)
+
+
+def _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec):
+    """Query Gaia DR3 via an IVOA Cone Search mirror (circle around the
+    selection's center, radius sized to cover its corners), then clip the
+    results down to the actual selection box and keep the 10 brightest."""
+    dra = (ra_max - ra_min) / 2.0 * math.cos(math.radians(center_dec))
+    ddec = (dec_max - dec_min) / 2.0
+    radius_deg = math.hypot(dra, ddec) * 1.05 + 0.001  # pad past the box corners
+
+    resp = requests.get(
+        GAIA_CONE_URL,
+        params={"RA": center_ra, "DEC": center_dec, "SR": radius_deg, "RESPONSEFORMAT": "votable"},
+        timeout=25,
+    )
+    resp.raise_for_status()
+    rows = _parse_votable_rows(resp.content, _GAIA_COLUMNS)
+
+    out = []
+    for row in rows:
+        ra, dec = _to_float(row.get("ra")), _to_float(row.get("dec"))
+        mag = _to_float(row.get("phot_g_mean_mag"))
+        if ra is None or dec is None or mag is None:
+            continue
+        if not (ra_min <= ra <= ra_max and dec_min <= dec <= dec_max):
+            continue  # cone search returns a circle - clip down to the actual box
+        source_id_raw = row.get("source_id")
+        out.append((
+            # int() directly, not int(float(...)) - Gaia source_ids are ~19
+            # digits, well past a double's exact-integer range (2^53), so
+            # routing through float() first would silently round them.
+            int(source_id_raw) if source_id_raw else None,
+            ra, dec, mag,
+            _to_float(row.get("pmra")), _to_float(row.get("pmdec")),
+            _to_float(row.get("teff_gspphot")), _to_float(row.get("bp_rp")), _to_float(row.get("parallax")),
+        ))
+    out.sort(key=lambda r: r[3])
+    return out[:10]
+
+
+def _query_gaia_tap(adql):
+    resp = requests.get(
+        GAIA_TAP_URL,
+        params={"REQUEST": "doQuery", "LANG": "ADQL", "FORMAT": "json", "QUERY": adql},
+        # A plain ra/dec BETWEEN scan over gaiadr3.gaia_source (billions of
+        # rows) isn't spatially indexed the way a cone search would be, so
+        # the sync TAP endpoint can legitimately take a while under load -
+        # matches the 90s timeout plate_solve.py already uses for its
+        # (larger) bulk query against the same table.
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return [tuple(row) for row in resp.json().get("data", [])]
+
+
+def _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql):
+    try:
+        return _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec)
+    except Exception:  # noqa: BLE001 - any cone-search failure (network, bad VOTable, ...) falls back to TAP
+        return _query_gaia_tap(adql)
+
+
 @app.route("/api/stars")
 def api_stars():
+    state = _get_state(request.args.get("image", ""))
+    missing = _require_lowres(state)
+    if missing:
+        return missing
+
     try:
-        x0, y0, x1, y1 = _parse_box(request.args, MASTER_WIDTH, MASTER_HEIGHT)
+        x0, y0, x1, y1 = _parse_box(request.args, state.lowres_width, state.lowres_height)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    ra0_rad, dec0_rad, plate_cx, plate_cy = _plate_params(state)
+    plate_arcsec_per_px = 206264.80624709636 / math.hypot(plate_cx[1], plate_cx[2])
+
     corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
-    radec_corners = [lowres_pixel_to_radec(px, py) for px, py in corners]
+    radec_corners = [lowres_pixel_to_radec(px, py, ra0_rad, dec0_rad, plate_cx, plate_cy) for px, py in corners]
     ras = [c[0] for c in radec_corners]
     decs = [c[1] for c in radec_corners]
     ra_min, ra_max = min(ras), max(ras)
     dec_min, dec_max = min(decs), max(decs)
-    center_ra, center_dec = lowres_pixel_to_radec((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    center_ra, center_dec = lowres_pixel_to_radec(
+        (x0 + x1) / 2.0, (y0 + y1) / 2.0, ra0_rad, dec0_rad, plate_cx, plate_cy
+    )
 
     sky_region = {
         "ra_min": ra_min, "ra_max": ra_max,
@@ -329,20 +443,20 @@ def api_stars():
         "center_ra_str": format_ra(center_ra), "center_dec_str": format_dec(center_dec),
         "ra_min_str": format_ra(ra_min), "ra_max_str": format_ra(ra_max),
         "dec_min_str": format_dec(dec_min), "dec_max_str": format_dec(dec_max),
-        "width_arcmin": (x1 - x0) * PLATE_ARCSEC_PER_PX / 60.0,
-        "height_arcmin": (y1 - y0) * PLATE_ARCSEC_PER_PX / 60.0,
+        "width_arcmin": (x1 - x0) * plate_arcsec_per_px / 60.0,
+        "height_arcmin": (y1 - y0) * plate_arcsec_per_px / 60.0,
         "lowres_box": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
     }
 
-    if HIRES_AVAILABLE:
-        scale_x = HIRES_WIDTH / MASTER_WIDTH
-        scale_y = HIRES_HEIGHT / MASTER_HEIGHT
+    if state.hires_available:
+        scale_x = state.hires_width / state.lowres_width
+        scale_y = state.hires_height / state.lowres_height
         # Mirror the int-floored bounds crop_hires actually extracts, so marker
         # fractions computed against this box line up with the delivered pixels.
-        hx0 = max(0, min(int(x0 * scale_x), HIRES_WIDTH - 1))
-        hy0 = max(0, min(int(y0 * scale_y), HIRES_HEIGHT - 1))
-        hx1 = max(hx0 + 1, min(int(x1 * scale_x), HIRES_WIDTH))
-        hy1 = max(hy0 + 1, min(int(y1 * scale_y), HIRES_HEIGHT))
+        hx0 = max(0, min(int(x0 * scale_x), state.hires_width - 1))
+        hy0 = max(0, min(int(y0 * scale_y), state.hires_height - 1))
+        hx1 = max(hx0 + 1, min(int(x1 * scale_x), state.hires_width))
+        hy1 = max(hy0 + 1, min(int(y1 * scale_y), state.hires_height))
         sky_region["hires_box"] = {"x0": hx0, "y0": hy0, "x1": hx1, "y1": hy1}
 
     adql = (
@@ -357,24 +471,18 @@ def api_stars():
     stars = []
     query_error = None
     try:
-        resp = requests.get(
-            GAIA_TAP_URL,
-            params={"REQUEST": "doQuery", "LANG": "ADQL", "FORMAT": "json", "QUERY": adql},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        for row in payload.get("data", []):
+        rows = _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql)
+        for row in rows:
             source_id, ra, dec, mag, pmra, pmdec, teff, bp_rp, parallax = row
-            # Gaia DR3 positions are for epoch J2016.0; the image was taken
-            # ~2025, so propagate proper motion forward before locating the
+            # Gaia DR3 positions are for epoch J2016.0; propagate proper motion
+            # forward to the image's observation epoch before locating the
             # star in the image (up to ~0.5 arcsec for fast movers).
             ra_img, dec_img = ra, dec
             if pmra is not None and pmdec is not None:
-                dt = IMAGE_EPOCH - GAIA_EPOCH
+                dt = state.cfg.image_epoch - GAIA_EPOCH
                 dec_img = dec + (pmdec * dt / 3.6e6)
                 ra_img = ra + (pmra * dt / 3.6e6) / math.cos(math.radians(dec))
-            lx, ly = radec_to_lowres_pixel(ra_img, dec_img)
+            lx, ly = radec_to_lowres_pixel(ra_img, dec_img, ra0_rad, dec0_rad, plate_cx, plate_cy)
             star = {
                 "source_id": source_id,
                 "designation": f"Gaia DR3 {source_id}",
@@ -391,13 +499,13 @@ def api_stars():
             if pmra is not None and pmdec is not None:
                 star["pm_mas_yr"] = math.hypot(pmra, pmdec)
                 star["pm_direction_deg"] = math.degrees(math.atan2(pmra, pmdec)) % 360.0
-            if HIRES_AVAILABLE:
+            if state.hires_available:
                 # Pixel centers map between resolutions as (i + 0.5) * scale, not
-                # i * scale - the naive form is off by 0.5*scale - 0.5 = ~6.5 hires
-                # px (~1.4 arcsec), a constant shift that's invisible at lowres but
-                # obvious when a small selection is zoomed.
-                star["hires_x"] = (lx + 0.5) * (HIRES_WIDTH / MASTER_WIDTH)
-                star["hires_y"] = (ly + 0.5) * (HIRES_HEIGHT / MASTER_HEIGHT)
+                # i * scale - the naive form is off by 0.5*scale - 0.5 px, a
+                # constant shift that's invisible at lowres but obvious when a
+                # small selection is zoomed.
+                star["hires_x"] = (lx + 0.5) * (state.hires_width / state.lowres_width)
+                star["hires_y"] = (ly + 0.5) * (state.hires_height / state.lowres_height)
             stars.append(star)
     except requests.RequestException as exc:
         query_error = f"Could not reach the Gaia archive: {exc}"
