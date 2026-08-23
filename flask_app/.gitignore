@@ -8,7 +8,10 @@ venv/
 data/
 *.part
 
-# Low-res preview JPEGs are also fetched on demand, except the one already
-# bundled in the repo.
+# Low-res preview JPEGs are also fetched on demand by default; the ones
+# below are bundled in the repo so the app works out of the box with no
+# download needed. Add a new image's filename here too if you want it
+# bundled as well - otherwise leave it out and it'll download on first use.
 static/img/*.jpg
 !static/img/ocean_of_stars.jpg
+!static/img/cosmos.jpg
