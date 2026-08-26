@@ -273,7 +273,25 @@
   .sky-region-box .row span:last-child { text-align: right; }
   .approx-note { font-size: 0.72rem; color: #6c6c80; margin-top: 8px; }
 
-  .star-table-wrap { max-height: 460px; overflow: auto; }
+  .star-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 0.82rem;
+    color: #9a9ab0;
+  }
+  .star-controls input[type="number"] {
+    width: 70px;
+    background: #14162c;
+    border: 1px solid #333;
+    border-radius: 4px;
+    color: #e8e8f0;
+    padding: 4px 6px;
+    font-size: 0.85rem;
+  }
+
+  .star-table-wrap { max-height: 460px; overflow-y: auto; overflow-x: auto; }
   .star-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
   .star-table th {
     position: sticky; top: 0;
@@ -400,9 +418,13 @@
       </fieldset>
 
       <fieldset>
-        <legend>10 brightest Gaia DR3 stars here</legend>
+        <legend>Brightest Gaia DR3 stars here</legend>
+        <div class="star-controls">
+          <label for="maxStarsInput">Max stars shown</label>
+          <input type="number" id="maxStarsInput" min="1" max="500" value="100">
+        </div>
         <div id="starListBody"><p class="crop-loading">-</p></div>
-        <div class="approx-note">Live query to the Gaia archive (gaiadr3.gaia_source), sorted by G-band magnitude. Click a star to highlight it on the images (arrow shows its +100&nbsp;yr proper-motion position - 1/10&nbsp;yr are sub-pixel at typical zoom). Distance is 1/parallax, "unknown" where parallax is missing or unreliable (common for faint/distant stars). Spectral type is estimated from teff_gspphot or BP&minus;RP color, not a formal classification.</div>
+        <div class="approx-note">Live query to the Gaia archive (gaiadr3.gaia_source), sorted by G-band magnitude. Hover (or click) a star to highlight it on the images (arrow shows its +100&nbsp;yr proper-motion position - 1/10&nbsp;yr are sub-pixel at typical zoom). Distance is 1/parallax, "unknown" where parallax is missing or unreliable (common for faint/distant stars). Spectral type is estimated from teff_gspphot or BP&minus;RP color, not a formal classification.</div>
       </fieldset>
     </div>
   </div>
@@ -450,6 +472,8 @@ const hiresMarker = document.getElementById('hiresMarker');
 const hiresDownload = document.getElementById('hiresDownload');
 const skyRegionBox = document.getElementById('skyRegionBox');
 const starListBody = document.getElementById('starListBody');
+const maxStarsInput = document.getElementById('maxStarsInput');
+let maxStars = parseInt(maxStarsInput.value, 10) || 100;
 
 let IMAGES_LIST = [];
 let currentImageKey = null;
@@ -916,12 +940,31 @@ function renderStarList() {
       </table>
     </div>`;
   starListBody.querySelectorAll('.star-row').forEach((el) => {
-    el.addEventListener('click', () => {
-      selectedStarIndex = parseInt(el.dataset.idx, 10);
-      renderStarList();
-      refreshOverlays();
-    });
+    const idx = parseInt(el.dataset.idx, 10);
+    const trigger = () => { if (idx !== selectedStarIndex) selectStarRow(idx); };
+    // Hover selects immediately (no click needed) so you can scan the table
+    // and watch the marker jump star to star; click is kept too so the
+    // selection is still reachable without a mouse (e.g. touch). Listening
+    // on 'mousemove' rather than 'mouseenter' matters here: scrolling the
+    // table with the wheel moves rows under a stationary cursor, and
+    // browsers synthesize mouseenter/mouseover in that case (to keep :hover
+    // accurate) - which was hijacking the scroll gesture into constantly
+    // re-selecting whatever row ended up under the cursor. 'mousemove' only
+    // ever fires from real pointer movement, never from scrolling.
+    el.addEventListener('mousemove', trigger);
+    el.addEventListener('click', trigger);
   });
+}
+
+// Toggles the .selected class in place rather than calling renderStarList()
+// (which rebuilds the table's innerHTML and would reset its scroll position
+// every time a star is selected).
+function selectStarRow(idx) {
+  selectedStarIndex = idx;
+  starListBody.querySelectorAll('.star-row').forEach((el) => {
+    el.classList.toggle('selected', parseInt(el.dataset.idx, 10) === idx);
+  });
+  refreshOverlays();
 }
 
 async function loadLowRes(params) {
@@ -1091,6 +1134,13 @@ async function loadStars(params) {
   refreshOverlays();
 }
 
+function buildStarsParams() {
+  const p = new URLSearchParams(selection);
+  p.set('image', currentImageKey);
+  p.set('max_stars', maxStars);
+  return p;
+}
+
 async function doExtract() {
   if (!selection) return;
   cropBtn.disabled = true;
@@ -1100,11 +1150,18 @@ async function doExtract() {
 
   const params = new URLSearchParams(selection);
   params.set('image', currentImageKey);
-  await Promise.all([loadLowRes(params), loadHiRes(params), loadStars(params)]);
+  await Promise.all([loadLowRes(params), loadHiRes(params), loadStars(buildStarsParams())]);
 
   cropBtn.disabled = false;
   cropBtn.textContent = 'Extract subimage';
 }
+
+maxStarsInput.addEventListener('change', () => {
+  const v = parseInt(maxStarsInput.value, 10);
+  maxStars = (Number.isFinite(v) && v > 0) ? Math.min(v, 500) : 100;
+  maxStarsInput.value = maxStars;
+  if (selection) loadStars(buildStarsParams());
+});
 
 cropBtn.addEventListener('click', doExtract);
 
@@ -1222,6 +1279,43 @@ window.addEventListener('mouseup', (e) => {
 
 attachZoomDrag('lowres', lowresImgWrap, lowresImg, lowresZoomBox);
 attachZoomDrag('hires', hiresImgWrap, hiresImg, hiresZoomBox);
+
+// --- Reverse lookup: hovering the crop image selects the nearest star ---
+// Inverse of positionMarker()'s box.x0 + frac*(box.x1-box.x0): maps a
+// pointer position on the displayed crop back into the same pixel space
+// star.lowres_x/lowres_y (or hires_x/hires_y) are already expressed in.
+function nearestStarIndex(kind, fx, fy) {
+  if (!currentStars.length || !cropBoxes) return null;
+  const box = kind === 'lowres' ? cropBoxes.lowres_box : cropBoxes.hires_box;
+  if (!box) return null;
+  const px = box.x0 + fx * (box.x1 - box.x0);
+  const py = box.y0 + fy * (box.y1 - box.y0);
+  let bestIdx = null, bestDist = Infinity;
+  currentStars.forEach((s, i) => {
+    const sx = kind === 'lowres' ? s.lowres_x : s.hires_x;
+    const sy = kind === 'lowres' ? s.lowres_y : s.hires_y;
+    if (sx === undefined || sy === undefined) return;
+    const d = Math.hypot(sx - px, sy - py);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  });
+  return bestIdx;
+}
+
+function attachStarHoverSelect(kind, imgEl) {
+  imgEl.addEventListener('mousemove', (e) => {
+    if (zoomDrag) return; // don't fight the drag-to-zoom gesture
+    const rect = imgEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const fx = (e.clientX - rect.left) / rect.width;
+    const fy = (e.clientY - rect.top) / rect.height;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+    const idx = nearestStarIndex(kind, fx, fy);
+    if (idx !== null && idx !== selectedStarIndex) selectStarRow(idx);
+  });
+}
+
+attachStarHoverSelect('lowres', lowresImg);
+attachStarHoverSelect('hires', hiresImg);
 
 loadImagesList();
 </script>

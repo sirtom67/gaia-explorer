@@ -33,6 +33,8 @@ GAIA_CONE_URL = "https://gaia.ari.uni-heidelberg.de/cone/search"
 GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
 LIGHT_YEARS_PER_PARSEC = 3.26156
 GAIA_EPOCH = 2016.0  # gaiadr3.gaia_source reference epoch (Julian year)
+DEFAULT_MAX_STARS = 100
+MAX_STARS_LIMIT = 500  # cap so a mistyped/malicious value can't force a huge query
 
 app = Flask(__name__)
 
@@ -351,10 +353,10 @@ def _to_float(v):
     return float(v)
 
 
-def _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec):
+def _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, max_stars):
     """Query Gaia DR3 via an IVOA Cone Search mirror (circle around the
     selection's center, radius sized to cover its corners), then clip the
-    results down to the actual selection box and keep the 10 brightest."""
+    results down to the actual selection box and keep the max_stars brightest."""
     dra = (ra_max - ra_min) / 2.0 * math.cos(math.radians(center_dec))
     ddec = (dec_max - dec_min) / 2.0
     radius_deg = math.hypot(dra, ddec) * 1.05 + 0.001  # pad past the box corners
@@ -386,7 +388,7 @@ def _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec):
             _to_float(row.get("teff_gspphot")), _to_float(row.get("bp_rp")), _to_float(row.get("parallax")),
         ))
     out.sort(key=lambda r: r[3])
-    return out[:10]
+    return out[:max_stars]
 
 
 def _query_gaia_tap(adql):
@@ -404,9 +406,9 @@ def _query_gaia_tap(adql):
     return [tuple(row) for row in resp.json().get("data", [])]
 
 
-def _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql):
+def _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql, max_stars):
     try:
-        return _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec)
+        return _query_gaia_cone(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, max_stars)
     except Exception:  # noqa: BLE001 - any cone-search failure (network, bad VOTable, ...) falls back to TAP
         return _query_gaia_tap(adql)
 
@@ -422,6 +424,12 @@ def api_stars():
         x0, y0, x1, y1 = _parse_box(request.args, state.lowres_width, state.lowres_height)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    try:
+        max_stars = int(request.args.get("max_stars", DEFAULT_MAX_STARS))
+    except ValueError:
+        max_stars = DEFAULT_MAX_STARS
+    max_stars = max(1, min(max_stars, MAX_STARS_LIMIT))
 
     ra0_rad, dec0_rad, plate_cx, plate_cy = _plate_params(state)
     plate_arcsec_per_px = 206264.80624709636 / math.hypot(plate_cx[1], plate_cx[2])
@@ -460,7 +468,7 @@ def api_stars():
         sky_region["hires_box"] = {"x0": hx0, "y0": hy0, "x1": hx1, "y1": hy1}
 
     adql = (
-        "SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag, pmra, pmdec, teff_gspphot, bp_rp, parallax "
+        f"SELECT TOP {max_stars} source_id, ra, dec, phot_g_mean_mag, pmra, pmdec, teff_gspphot, bp_rp, parallax "
         "FROM gaiadr3.gaia_source "
         f"WHERE ra BETWEEN {ra_min!r} AND {ra_max!r} "
         f"AND dec BETWEEN {dec_min!r} AND {dec_max!r} "
@@ -471,7 +479,7 @@ def api_stars():
     stars = []
     query_error = None
     try:
-        rows = _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql)
+        rows = _query_gaia_stars(ra_min, ra_max, dec_min, dec_max, center_ra, center_dec, adql, max_stars)
         for row in rows:
             source_id, ra, dec, mag, pmra, pmdec, teff, bp_rp, parallax = row
             # Gaia DR3 positions are for epoch J2016.0; propagate proper motion
