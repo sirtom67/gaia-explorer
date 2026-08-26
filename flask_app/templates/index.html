@@ -967,6 +967,23 @@ function selectStarRow(idx) {
   refreshOverlays();
 }
 
+// Scrolls the star table (and only the star table - not the page) just far
+// enough to reveal a row, keeping it clear of the sticky header.
+function scrollStarRowIntoView(idx) {
+  const wrap = starListBody.querySelector('.star-table-wrap');
+  const row = starListBody.querySelector(`.star-row[data-idx="${idx}"]`);
+  if (!wrap || !row) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const header = wrap.querySelector('thead');
+  const headerH = header ? header.getBoundingClientRect().height : 0;
+  if (rowRect.top < wrapRect.top + headerH) {
+    wrap.scrollTop -= (wrapRect.top + headerH) - rowRect.top;
+  } else if (rowRect.bottom > wrapRect.bottom) {
+    wrap.scrollTop += rowRect.bottom - wrapRect.bottom;
+  }
+}
+
 async function loadLowRes(params) {
   lowresStatus.textContent = 'Extracting from low-res JPEG...';
   lowresImgWrap.style.display = 'none';
@@ -1269,7 +1286,19 @@ window.addEventListener('mouseup', (e) => {
   const y = Math.max(0, Math.round(p0.y));
   const w = Math.min(MASTER_WIDTH, Math.round(p1.x)) - x;
   const h = Math.min(MASTER_HEIGHT, Math.round(p1.y)) - y;
-  if (w < 2 || h < 2) return; // too small a drag - treat as a stray click
+  if (w < 2 || h < 2) {
+    // Too small to be a zoom drag - treat it as a click on a star: select the
+    // nearest one and scroll the table to it. Hovering already selects, but
+    // the matching row is often outside the scrolled view, so a click is what
+    // reveals it (auto-scrolling on hover would yank the list around as the
+    // pointer moves).
+    const idx = nearestStarIndex(drag.kind, fx0, fy0);
+    if (idx !== null) {
+      selectStarRow(idx);
+      scrollStarRowIntoView(idx);
+    }
+    return;
+  }
 
   selection = { x, y, w, h };
   updateSelectionReadout();
