@@ -45,15 +45,18 @@ More images can be added by appending an `ImageConfig` entry to
   field of view otherwise, with star positions propagated from Gaia's J2016
   epoch to each image's approximate observation epoch.
 
-  Ocean of Stars has a real plate solve (median residual ~0.4 preview px).
-  Cosmos currently uses the linear fallback (good to a handful of pixels);
-  once its preview JPEG is downloaded, refine it by running:
+  Both bundled images have a real plate solve (median residual ~0.4 preview
+  px, measured against flux-weighted stellar centroids). The linear fallback
+  only applies to a newly added image that hasn't been solved yet — it is
+  good to roughly a pixel, which is invisible at full-frame zoom but throws
+  markers visibly off-star once a small selection is blown up. To solve a new
+  image, download its preview JPEG and run:
 
   ```
-  python flask_app/tools/plate_solve.py --image cosmos
+  python flask_app/tools/plate_solve.py --image <key>
   ```
 
-  and pasting the printed `plate_cx`/`plate_cy` tuples into its `ImageConfig`
+  then paste the printed `plate_cx`/`plate_cy` tuples into its `ImageConfig`
   in `flask_app/images.py`.
 
 ### Setup

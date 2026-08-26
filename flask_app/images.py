@@ -108,13 +108,21 @@ IMAGES = {
         hires_env_var="COSMOS_TIFF",
         hires_filename="noirlab2618a.tif",
         hires_size_hint_bytes=9_400_000_000,
-        # No dedicated plate solve yet - falls back to linear_plate_solution()
-        # below. Once the JPEG has been downloaded, run:
-        #   python flask_app/tools/plate_solve.py --image cosmos
-        # and paste the printed plate_cx/plate_cy tuples in here for
-        # sub-pixel-accurate star markers near the frame edges.
-        plate_cx=None,
-        plate_cy=None,
+        # Fit against 2346 real Gaia DR3 stars (G<16) - see tools/plate_solve.py.
+        # Median residual ~0.4px, max ~1.5px across the whole frame. The linear
+        # fallback this replaced was systematically ~1px down-and-right, which
+        # is invisible at full-frame zoom but throws markers well off-star once
+        # a small selection is blown up.
+        plate_cx=(
+            1999.429629657741, -74286.08170720481, -1.9817869263966585,
+            28.01688214166988, -58.44591593193922, -132.8836916243697,
+            29479.309234174118, 1414.7101693977584, -2413.661303476696, -23923.724608434964,
+        ),
+        plate_cy=(
+            1090.2477650862595, 5.108683775555135, -74294.04251471009,
+            136.6009162396166, 76.59458929651078, 121.11616370154692,
+            -7781.594008359267, 3834.221183369336, -4748.448079691677, 7842.147274906828,
+        ),
     ),
 }
 
